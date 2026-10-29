@@ -7,10 +7,10 @@
 #
 # Steps:
 #  1. Composer self-update          6. .env + APP_KEY + DB creds
-#  2. Database CA certificate       7. npm install + Tailwind build
-#  3. Clone app into ./src          8. OpenCode (V2)
-#  4. composer install              9. ngrok (direct download, apt fallback)
-#  5. serve/link commands          10. Start Laravel dev server
+#  2. PHP pdo_mysql extension       7. npm install + Tailwind build
+#  3. Database CA certificate       8. OpenCode (V2)
+#  4. Clone app into ./src          9. ngrok (direct download, apt fallback)
+#  5. composer install             10. serve/link commands + dev server
 # NO migrations are run — the app uses an existing database.
 # ==============================================================
 
@@ -81,6 +81,18 @@ fi
 # ---------- step implementations ----------
 step_composer_selfupdate() {
     sudo -E composer self-update
+}
+
+step_php_extensions() {
+    # the PHP devcontainer image ships WITHOUT the mysql PDO driver
+    if php -m 2>/dev/null | grep -qiE '^pdo_mysql$'; then
+        echo "pdo_mysql already loaded"
+        return 0
+    fi
+    sudo docker-php-ext-install pdo_mysql
+    php -m 2>/dev/null | grep -qiE '^pdo_mysql$' \
+        || { echo "pdo_mysql still not loaded"; return 1; }
+    echo "pdo_mysql loaded"
 }
 
 step_copy_ca() {
@@ -249,16 +261,17 @@ step_serve_app() {
 
 # ---------- run the steps ----------
 step "1. Composer self-update"        step_composer_selfupdate
-step "2. Database CA certificate"     step_copy_ca
-step "3. Clone application"           step_clone_app
-step "4. composer install"            step_composer_install
-step "5. .env + APP_KEY + DB creds"   step_env_file
-step "6. npm install"                 step_npm_install
-step "7. Tailwind build"              step_npm_build
-step "8. OpenCode"                    step_opencode
-step "9. ngrok"                       step_ngrok
-step "10. serve & link commands"      step_helper_commands
-step "11. Start dev server"           step_serve_app
+step "2. PHP pdo_mysql extension"     step_php_extensions
+step "3. Database CA certificate"     step_copy_ca
+step "4. Clone application"           step_clone_app
+step "5. composer install"            step_composer_install
+step "6. .env + APP_KEY + DB creds"   step_env_file
+step "7. npm install"                 step_npm_install
+step "8. Tailwind build"              step_npm_build
+step "9. OpenCode"                    step_opencode
+step "10. ngrok"                      step_ngrok
+step "11. serve & link commands"      step_helper_commands
+step "12. Start dev server"           step_serve_app
 
 # ---------- environment diagnostics ----------
 cd "${REPO_ROOT}"

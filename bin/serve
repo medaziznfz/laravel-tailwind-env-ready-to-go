@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# serve — start or restart the Laravel dev server (php artisan serve)
+#         on port 8000, in the background.
+#
+# Usage:  serve          (run from the workspace root, app in ./src)
+#         APP_DIR=myapp serve
+set -euo pipefail
+
+SRC="${APP_DIR:-src}"
+
+if [ ! -f "${SRC}/artisan" ]; then
+    echo "./${SRC}/artisan not found — run from the workspace root"
+    echo "(the app is cloned into ./${SRC} by the post-create setup)."
+    exit 1
+fi
+
+# stop any previous instance
+pkill -f "artisan serve" >/dev/null 2>&1 || true
+
+cd "${SRC}"
+nohup php artisan serve --host=0.0.0.0 --port=8000 >/tmp/laravel-serve.log 2>&1 &
+
+echo "✅ Laravel running locally at http://localhost:8000 (log: /tmp/laravel-serve.log)"
+echo "🌐 To expose it on the internet: run  link"

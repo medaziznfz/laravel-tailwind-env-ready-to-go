@@ -1,0 +1,17 @@
+# app source cloned by .devcontainer/post-create.sh (never commit it here)
+/src/
+
+# local app artifacts (in case the repo is ever used as a dev root)
+/node_modules/
+/vendor/
+/public/build/
+/public/hot
+
+# environment files (the template configures them from .env.example)
+.env
+*.env.backup
+
+# logs & local files
+*.log
+.DS_Store
+Thumbs.db

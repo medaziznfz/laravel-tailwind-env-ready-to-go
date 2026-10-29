@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# link — print the public ngrok URL of the app served on port 8000.
+#        Starts the tunnel if none is running, or reuses the existing one.
+#        Also updates APP_URL in the app .env so it matches the tunnel.
+#
+# Requires: an ngrok authtoken (NGROK_AUTHTOKEN env, ~/.ngrok-token,
+#           or pre-configured via `ngrok config add-authtoken`).
+set -euo pipefail
+
+PORT=8000
+API_URL="http://127.0.0.1:4040/api/tunnels"
+
+resolve_url() {
+    curl -s "$API_URL" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).tunnels[0].public_url)}catch(e){}})'
+}
+
+update_env_url() {
+    ENVF="${APP_DIR:-src}/.env"
+    URL="$1"
+    [ -f "${ENVF}" ] && [ -n "${URL}" ] || return 0
+    if grep -qE '^APP_URL=.*' "${ENVF}"; then
+        sed -i "s|^APP_URL=.*|APP_URL=\"${URL}\"|" "${ENVF}"
+    else
+        printf 'APP_URL="%s"\n' "${URL}" >> "${ENVF}"
+    fi
+}
+
+# --- make sure an authtoken is configured -------------------------------
+if ! ngrok config check >/dev/null 2>&1; then
+    TOKEN="${NGROK_AUTHTOKEN:-}"
+    if [ -z "${TOKEN}" ] && [ -f "$HOME/.ngrok-token" ]; then
+        TOKEN="$(cat "$HOME/.ngrok-token")"
+    fi
+    if [ -z "${TOKEN}" ]; then
+        echo "No ngrok authtoken found."
+        echo "Get one free at https://dashboard.ngrok.com/get-started/your-authtoken then run:"
+        echo "  ngrok config add-authtoken <token>"
+        exit 1
+    fi
+    ngrok config add-authtoken "${TOKEN}" >/dev/null
+fi
+
+# --- a tunnel is already up? just print its URL -------------------------
+if curl -sf -o /dev/null "$API_URL"; then
+    URL="$(resolve_url)"
+    if [ -n "${URL}" ]; then
+        update_env_url "${URL}"
+        echo "${URL}"
+        exit 0
+    fi
+fi
+
+# --- otherwise start the tunnel and wait for it -------------------------
+nohup ngrok http "${PORT}" --log stdout --log-format logfmt >/tmp/ngrok.log 2>&1 &
+
+for _ in $(seq 1 20); do
+    sleep 1
+    URL="$(resolve_url)"
+    if [ -n "${URL}" ]; then
+        update_env_url "${URL}"
+        echo "${URL}"
+        echo "(APP_URL in ${APP_DIR:-src}/.env was updated to match this link)"
+        exit 0
+    fi
+done
+
+echo "Tunnel did not come up within 20s — check /tmp/ngrok.log"
+exit 1

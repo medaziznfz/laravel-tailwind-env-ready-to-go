@@ -1,0 +1,40 @@
+{
+  "name": "Laravel + Tailwind (outside DB)",
+  "image": "mcr.microsoft.com/devcontainers/php:4.1.7-8.5-trixie",
+  "remoteUser": "vscode",
+
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "26"
+    }
+  },
+
+  "forwardPorts": [8000, 5173],
+  "portsAttributes": {
+    "8000": {
+      "label": "Laravel dev server",
+      "onAutoForward": "notify"
+    },
+    "5173": {
+      "label": "Vite / Tailwind",
+      "onAutoForward": "silent"
+    }
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "bmewburn.vscode-intelephense-client",
+        "bradlc.vscode-tailwindcss",
+        "onecentlin.laravel-blade",
+        "amiralizadeh9480.laravel-extra-intellisense",
+        "shufo.vscode-blade-formatter"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  },
+
+  "postCreateCommand": "bash .devcontainer/post-create.sh"
+}

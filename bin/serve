@@ -2,22 +2,37 @@
 # serve — start or restart the Laravel dev server (php artisan serve)
 #         on port 8000, in the background.
 #
-# Usage:  serve          (run from the workspace root, app in ./src)
+# Works from anywhere: the repo root, inside src/, or any subfolder —
+# it walks up the directory tree to find the app automatically.
+#
+# Usage:  serve                          (APP_DIR=src by default)
 #         APP_DIR=myapp serve
 set -euo pipefail
 
 SRC="${APP_DIR:-src}"
 
-if [ ! -f "${SRC}/artisan" ]; then
-    echo "./${SRC}/artisan not found — run from the workspace root"
-    echo "(the app is cloned into ./${SRC} by the post-create setup)."
+# locate the directory containing artisan
+APP_ROOT="$PWD"
+if [ -f "${APP_ROOT}/artisan" ]; then
+    :   # already inside the app directory
+elif [ -f "${APP_ROOT}/${SRC}/artisan" ]; then
+    APP_ROOT="${APP_ROOT}/${SRC}"
+else
+    while [ "${APP_ROOT}" != "/" ] && [ ! -f "${APP_ROOT}/${SRC}/artisan" ]; do
+        APP_ROOT="$(dirname "${APP_ROOT}")"
+    done
+fi
+
+if [ ! -f "${APP_ROOT}/artisan" ]; then
+    echo "artisan not found (tried ./${SRC} and all parent folders) —"
+    echo "run the post-create setup first or check APP_DIR."
     exit 1
 fi
 
 # stop any previous instance
 pkill -f "artisan serve" >/dev/null 2>&1 || true
 
-cd "${SRC}"
+cd "${APP_ROOT}"
 nohup php artisan serve --host=0.0.0.0 --port=8000 >/tmp/laravel-serve.log 2>&1 &
 
 echo "✅ Laravel running locally at http://localhost:8000 (log: /tmp/laravel-serve.log)"

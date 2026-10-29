@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# link — print the public ngrok URL of the app served on port 8000.
-#        Starts the tunnel if none is running, or reuses the existing one.
+# link — start (or reuse) the ngrok tunnel and print the public URL.
 #        Also updates APP_URL in the app .env so it matches the tunnel.
+#        Works from anywhere (walks up to find the app .env).
 #
 # Requires: an ngrok authtoken (NGROK_AUTHTOKEN env, ~/.ngrok-token,
 #           or pre-configured via `ngrok config add-authtoken`).
@@ -14,10 +14,24 @@ resolve_url() {
     curl -s "$API_URL" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).tunnels[0].public_url)}catch(e){}})'
 }
 
+locate_app() {
+    local DIR="$PWD"
+    if [ -f "${DIR}/.env" ]; then
+        printf '%s' "${DIR}/.env"
+    elif [ -f "${DIR}/${APP_DIR:-src}/.env" ]; then
+        printf '%s' "${DIR}/${APP_DIR:-src}/.env"
+    else
+        while [ "${DIR}" != "/" ]; do
+            DIR="$(dirname "${DIR}")"
+            [ -f "${DIR}/${APP_DIR:-src}/.env" ] && printf '%s' "${DIR}/${APP_DIR:-src}/.env" && return 0
+        done
+    fi
+}
+
 update_env_url() {
-    ENVF="${APP_DIR:-src}/.env"
+    ENVF="$(locate_app)"
     URL="$1"
-    [ -f "${ENVF}" ] && [ -n "${URL}" ] || return 0
+    [ -n "${ENVF}" ] && [ -n "${URL}" ] || return 0
     if grep -qE '^APP_URL=.*' "${ENVF}"; then
         sed -i "s|^APP_URL=.*|APP_URL=\"${URL}\"|" "${ENVF}"
     else

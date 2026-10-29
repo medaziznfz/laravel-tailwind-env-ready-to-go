@@ -89,7 +89,16 @@ step_php_extensions() {
         echo "pdo_mysql already loaded"
         return 0
     fi
-    sudo docker-php-ext-install pdo_mysql
+    # NOTE: plain `sudo` resets the environment and PHP_INI_DIR is lost,
+    # which breaks docker-php-ext-enable (/conf.d/ without a prefix).
+    # We pass PHP_INI_DIR explicitly and check the result ourselves.
+    sudo PHP_INI_DIR=/usr/local/etc/php docker-php-ext-install pdo_mysql \
+        || sudo docker-php-ext-install pdo_mysql
+    if ! php -m 2>/dev/null | grep -qiE '^pdo_mysql$'; then
+        # last-resort: write the ini file directly
+        sudo sh -c 'mkdir -p /usr/local/etc/php/conf.d \
+            && echo extension=pdo_mysql.so > /usr/local/etc/php/conf.d/docker-php-ext-pdo_mysql.ini'
+    fi
     php -m 2>/dev/null | grep -qiE '^pdo_mysql$' \
         || { echo "pdo_mysql still not loaded"; return 1; }
     echo "pdo_mysql loaded"

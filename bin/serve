@@ -29,8 +29,13 @@ if [ ! -f "${APP_ROOT}/artisan" ]; then
     exit 1
 fi
 
-# stop any previous instance
+# stop any previous instance — BOTH the artisan parent AND its php -S child
+# (artisan serve spawns a detached php -S server.php; killing only the
+#  parent leaves a zombie without newly-installed PHP extensions bound to 8000)
 pkill -f "artisan serve" >/dev/null 2>&1 || true
+pkill -f "php -S 0.0.0.0:8000" >/dev/null 2>&1 || true
+pkill -f "server.php" >/dev/null 2>&1 || true
+sleep 1
 
 cd "${APP_ROOT}"
 nohup php artisan serve --host=0.0.0.0 --port=8000 >/tmp/laravel-serve.log 2>&1 &

@@ -157,10 +157,20 @@ step_npm_build() {
 }
 
 step_opencode() {
-    if command -v opencode >/dev/null 2>&1; then
-        echo "existing $(opencode --version 2>/dev/null || echo) — updating"
+    # sudo resets PATH (node lives outside it) — install WITHOUT sudo
+    # using a user-level npm prefix, then expose the binary system-wide.
+    NPM_PREFIX="${HOME}/.npm-global"
+    export NPM_CONFIG_PREFIX="${NPM_PREFIX}"
+    mkdir -p "${NPM_PREFIX}"
+    npm install -g @opencode/cli@latest
+    BINFILE="$(find "${NPM_PREFIX}/bin" -maxdepth 1 -name 'opencode*' 2>/dev/null | head -n1)"
+    if [ -n "${BINFILE}" ]; then
+        sudo ln -sf "${BINFILE}" /usr/local/bin/opencode
+    else
+        echo "opencode binary not found in ${NPM_PREFIX}/bin"
+        return 1
     fi
-    sudo npm install -g @opencode/cli@latest
+    opencode --version
 }
 
 step_ngrok() {
@@ -188,7 +198,10 @@ step_ngrok() {
             sudo apt-get install -y ngrok
         fi
     fi
-    sudo ln -sf "$(command -v ngrok || echo "${BIN_DIR}/ngrok")" /usr/local/bin/ngrok
+    NGROK_BIN="$(command -v ngrok || echo "${BIN_DIR}/ngrok")"
+    if ! sudo ln -sf "${NGROK_BIN}" /usr/local/bin/ngrok 2>/dev/null; then
+        echo "(symlink skipped — same file)"
+    fi
     ngrok --version
 }
 
@@ -210,9 +223,17 @@ step_helper_commands() {
     if [ -n "${NGROK_AUTHTOKEN:-}" ]; then
         printf '%s' "${NGROK_AUTHTOKEN}" > "$HOME/.ngrok-token"
     fi
-    if [ -f "$HOME/.ngrok-token" ]; then
-        "$HOME/.local/bin/ngrok" config add-authtoken "$(cat "$HOME/.ngrok-token")" >/dev/null
-        echo "ngrok authtoken registered"
+    if [ -f "$HOME/.ngrok-token" ] && command -v ngrok >/dev/null 2>&1; then
+        NGROK_BIN="$(command -v ngrok)"
+        if "${NGROK_BIN}" config add-authtoken "$(cat "$HOME/.ngrok-token")" >/dev/null; then
+            echo "ngrok authtoken registered"
+        else
+            echo "!! failed to register the ngrok authtoken"
+            return 1
+        fi
+    else
+        echo "ngrok token NOT registered (missing token or binary)"
+        return 1
     fi
 }
 
@@ -240,6 +261,7 @@ step "10. serve & link commands"      step_helper_commands
 step "11. Start dev server"           step_serve_app
 
 # ---------- environment diagnostics ----------
+cd "${REPO_ROOT}"
 echo ""
 echo "────────────── DIAGNOSTICS ──────────────"
 php -v 2>/dev/null | head -1 || echo "php missing"
@@ -249,9 +271,10 @@ npm -v 2>/dev/null || echo "npm missing"
 (command -v ngrok && ngrok --version) 2>/dev/null || echo "ngrok not available"
 (command -v opencode && opencode --version) 2>/dev/null || echo "opencode not available"
 [ -f "$HOME/.mysql-ca.pem" ]        && echo "SSL CA file: present" || echo "SSL CA file: MISSING"
-[ -f "${APP_DIR}/.env" ]            && echo ".env file: present"   || echo ".env file: MISSING"
-[ -d "${APP_DIR}/vendor" ]          && echo "vendor/: present"     || echo "vendor/: MISSING"
-[ -d "${APP_DIR}/node_modules" ]    && echo "node_modules/: present" || echo "node_modules/: MISSING"
+[ -f "${REPO_ROOT}/${APP_DIR}/.env" ]         && echo ".env file: present"   || echo ".env file: MISSING"
+[ -d "${REPO_ROOT}/${APP_DIR}/vendor" ]       && echo "vendor/: present"     || echo "vendor/: MISSING"
+[ -d "${REPO_ROOT}/${APP_DIR}/node_modules" ] && echo "node_modules/: present" || echo "node_modules/: MISSING"
+[ -d "${REPO_ROOT}/${APP_DIR}/public/build" ] && echo "public/build/: present" || echo "public/build/: MISSING"
 pgrep -f "artisan serve" >/dev/null && echo "dev server: RUNNING on :8000" || echo "dev server: NOT running"
 curl -s -o /dev/null -w "port 8000 HTTP code: %{http_code}\n" --max-time 3 http://localhost:8000 || true
 echo "ngrok S3 reachability: $(curl -s -o /dev/null -w '%{http_code}' --max-time 8 https://ngrok-agent.s3.amazonaws.com/ || echo unreachable)"

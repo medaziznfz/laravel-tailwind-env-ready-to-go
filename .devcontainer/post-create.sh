@@ -1,51 +1,25 @@
 #!/usr/bin/env bash
 # ==============================================================
-# Codespace post-create setup — FAULT-TOLERANT + DIAGNOSTIC
-# Every step runs independently; no failure kills the whole script.
-# A full report is written to  post-create-report.txt  (repo root):
-# send that file's content to your assistant for debugging.
+# Codespace post-create setup — Laravel + Tailwind + cloud MySQL
 #
-# Steps:
-#  1. Composer self-update          6. .env + APP_KEY + DB creds
-#  2. PHP pdo_mysql extension       7. npm install + Tailwind build
-#  3. Database CA certificate       8. OpenCode (V2)
-#  4. Clone app into ./src          9. ngrok (direct download, apt fallback)
-#  5. composer install             10. serve/link commands + dev server
+# Installs/updates: Composer (latest), PHP pdo_mysql, app deps,
+# ngrok, OpenCode (V2) — then configures .env and starts the app.
+#
+# Output is intentionally concise: warnings only when something
+# needs attention (e.g. missing Codespace secrets).
+#
+# Credentials are NOT in this file. They come from Codespace
+# secrets: DB_PASSWORD and NGROK_AUTHTOKEN (Repository access set).
 # NO migrations are run — the app uses an existing database.
 # ==============================================================
 
 set -uo pipefail
 
-# ---------- setup ----------
+# ------------------- configuration ----------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-REPORT_FILE="${REPO_ROOT}/post-create-report.txt"
+BIN_DIR="$HOME/.local/bin"
 
-FAILED=()
-PASSED=()
-SKIPPED=()
-
-exec > >(tee "${REPORT_FILE}") 2>&1
-
-echo "══════════════════════════════════════════════════════"
-echo "  POST-CREATE SETUP — $(date -u '+%Y-%m-%d %H:%M UTC')"
-echo "  Codespace container: $(uname -sr)"
-echo "══════════════════════════════════════════════════════"
-
-step() {
-    local name="$1"; shift
-    echo ""
-    echo "────────────── $name ──────────────"
-    if "$@"; then
-        echo "→ ✅ ${name}: OK"
-        PASSED+=("${name}")
-    else
-        echo "→ ❌ ${name}: FAILED"
-        FAILED+=("${name}")
-    fi
-}
-
-# ---------- Configuration ----------
 REPO_URL="https://github.com/S-Marouene/Laravel-adm-tawilwindcss.git"
 APP_DIR="src"
 
@@ -54,273 +28,165 @@ DB_HOST=mysql-onpc-onpc.g.aivencloud.com
 DB_PORT=15850
 DB_DATABASE=defaultdb
 DB_USERNAME=avnadmin
-# Provided by a GitHub Codespace secret named DB_PASSWORD (nothing committed here)
-DB_PASSWORD="${DB_PASSWORD:-}"
-# Aiven requires SSL — certs/ca.pem is copied and referenced from .env
-CA_FILE="certs/ca.pem"
+DB_PASSWORD="${DB_PASSWORD:-}"        # Codespace secret: DB_PASSWORD
+
+CA_FILE="certs/ca.pem"                # committed database CA (Aiven SSL)
 CA_DEST="$HOME/.mysql-ca.pem"
 
-# ngrok authtoken — Codespace secret NGROK_AUTHTOKEN (nothing committed here)
-NGROK_AUTHTOKEN="${NGROK_AUTHTOKEN:-}"
+NGROK_AUTHTOKEN="${NGROK_AUTHTOKEN:-}"  # Codespace secret: NGROK_AUTHTOKEN
 
-# ---------- missing-secret early warnings ----------
+warn() { echo "  ⚠  $*"; }
+
+# replace KEY=value in a file, or append it when missing
+set_env_key() {
+    local key="$1" value="$2" file="$3"
+    if grep -qE "^${key}=.*" "${file}"; then
+        sed -i "s|^${key}=.*|${key}=\"${value}\"|" "${file}"
+    else
+        printf '%s="%s"\n' "${key}" "${value}" >> "${file}"
+    fi
+}
+
+# missing secrets → tell the user once, clearly
 if [ -z "${DB_PASSWORD}" ]; then
-    echo ""
-    echo "❌ DB_PASSWORD is EMPTY — the Codespace secret was not found."
-    echo "   Cause: no secret named 'DB_PASSWORD' is attached to this repo,"
-    echo "   or it was added after the Codespace was created (fix = rebuild)."
-    echo "   Fix: GitHub → Settings → Secrets and variables → Codespaces → New secret"
-    echo "        Name DB_PASSWORD → Repository access: this repository → rebuild."
-    echo "   Note: setup still continues so you can also fill src/.env manually."
+    echo "⚠  DB_PASSWORD secret not set — add it at github.com/settings/codespaces"
+    echo "   (name: DB_PASSWORD, Repository access: this repo), then rebuild."
 fi
 if [ -z "${NGROK_AUTHTOKEN}" ] && [ ! -f "$HOME/.ngrok-token" ]; then
-    echo "❌ NGROK_AUTHTOKEN is EMPTY — 'link' will not work until you add"
-    echo "   this Codespace secret (or run: ngrok config add-authtoken <token>)."
+    echo "⚠  NGROK_AUTHTOKEN secret not set — 'link' will ask for it later."
 fi
 
-# ---------- step implementations ----------
-step_composer_selfupdate() {
-    sudo -E composer self-update
-}
+# ------------------- 1. Composer (latest) ---------------------
+if ! sudo -E composer self-update --quiet >/dev/null 2>&1
+then sudo -E composer self-update || warn "Composer self-update failed (continuing)"
+fi
 
-step_php_extensions() {
-    # the PHP devcontainer image ships WITHOUT the mysql PDO driver
-    if php -m 2>/dev/null | grep -qiE '^pdo_mysql$'; then
-        echo "pdo_mysql already loaded"
-        return 0
-    fi
-    # NOTE: plain `sudo` resets the environment and PHP_INI_DIR is lost,
-    # which breaks docker-php-ext-enable (/conf.d/ without a prefix).
-    # We pass PHP_INI_DIR explicitly and check the result ourselves.
-    sudo PHP_INI_DIR=/usr/local/etc/php docker-php-ext-install pdo_mysql \
-        || sudo docker-php-ext-install pdo_mysql
-    if ! php -m 2>/dev/null | grep -qiE '^pdo_mysql$'; then
-        # last-resort: write the ini file directly
-        sudo sh -c 'mkdir -p /usr/local/etc/php/conf.d \
-            && echo extension=pdo_mysql.so > /usr/local/etc/php/conf.d/docker-php-ext-pdo_mysql.ini'
-    fi
+# ------------------- 2. PHP pdo_mysql -------------------------
+# The PHP devcontainer image ships without the MySQL PDO driver.
+if ! php -m 2>/dev/null | grep -qiE '^pdo_mysql$'; then
+    sudo docker-php-ext-install pdo_mysql >/dev/null 2>&1 \
+        || sudo -E docker-php-ext-install pdo_mysql || warn "pdo_mysql compile failed"
+    # docker-php-ext-enable loses PHP_INI_DIR under sudo — write the ini directly
+    sudo sh -c 'mkdir -p /usr/local/etc/php/conf.d \
+        && echo extension=pdo_mysql.so > /usr/local/etc/php/conf.d/docker-php-ext-pdo_mysql.ini'
     php -m 2>/dev/null | grep -qiE '^pdo_mysql$' \
-        || { echo "pdo_mysql still not loaded"; return 1; }
-    echo "pdo_mysql loaded"
-}
+        || warn "pdo_mysql still not loaded"
+fi
 
-step_copy_ca() {
-    if [ -f "${REPO_ROOT}/${CA_FILE}" ]; then
-        cp "${REPO_ROOT}/${CA_FILE}" "${CA_DEST}" && \
-            echo "CA copied: ${CA_DEST} ($(wc -l < "${CA_DEST}") lines)"
-    else
-        echo "${CA_FILE} missing from the template repo"
-        return 1
-    fi
-}
+# ------------------- 3. Database CA certificate ---------------
+if [ -f "${REPO_ROOT}/${CA_FILE}" ]; then
+    cp -f "${REPO_ROOT}/${CA_FILE}" "${CA_DEST}"
+else
+    warn "${CA_FILE} missing in the template repo"
+fi
 
-step_clone_app() {
-    cd "${REPO_ROOT}"
-    if [ ! -f "${APP_DIR}/artisan" ]; then
-        rm -rf "${APP_DIR}"
-        git clone "${REPO_URL}" "${APP_DIR}"
-    else
-        echo "skipping clone — ${APP_DIR}/artisan already exists"
-        if [ -d "${APP_DIR}/.git" ]; then
-            git -C "${APP_DIR}" pull --ff-only || true
-        fi
-        return 0
-    fi
-}
+# ------------------- 4. Clone the application -----------------
+cd "${REPO_ROOT}"
+if [ ! -f "${APP_DIR}/artisan" ]; then
+    rm -rf "${APP_DIR}"
+    git clone --quiet "${REPO_URL}" "${APP_DIR}" || \
+        warn "repository clone failed (${REPO_URL})"
+fi
 
-step_composer_install() {
-    cd "${REPO_ROOT}/${APP_DIR}"
-    composer install --no-interaction
-}
+# ------------------- 5. PHP dependencies ----------------------
+if [ -f "${APP_DIR}/composer.json" ]; then
+    (cd "${APP_DIR}" && composer install --no-interaction --quiet --no-progress) \
+        || warn "composer install failed"
+fi
 
-step_env_file() {
-    cd "${REPO_ROOT}/${APP_DIR}"
+# ------------------- 6. .env + APP_KEY + DB credentials -------
+if [ -f "${APP_DIR}" ]; then
+    cd "${APP_DIR}"
     if [ ! -f .env ]; then
-        if [ -f .env.example ]; then cp .env.example .env; else touch .env; fi
+        [ -f .env.example ] && cp .env.example .env || touch .env
     fi
-    # helper: replace KEY=value or append
-    set_env_key() {
-        local key="$1" value="$2"
-        if grep -qE "^${key}=.*" .env; then
-            sed -i "s|^${key}=.*|${key}=\"${value}\"|" .env
-        else
-            printf '%s="%s"\n' "${key}" "${value}" >> .env
-        fi
-    }
     if grep -qE '^APP_KEY=$' .env || ! grep -qE '^APP_KEY=.*[[:alnum:]]' .env; then
-        php artisan key:generate --force
+        php artisan key:generate --force >/dev/null 2>&1 || warn "key:generate failed"
     fi
-    set_env_key DB_CONNECTION "${DB_CONNECTION}"
-    set_env_key DB_HOST "${DB_HOST}"
-    set_env_key DB_PORT "${DB_PORT}"
-    set_env_key DB_DATABASE "${DB_DATABASE}"
-    set_env_key DB_USERNAME "${DB_USERNAME}"
-    set_env_key DB_PASSWORD "${DB_PASSWORD}"
-    set_env_key MYSQL_ATTR_SSL_CA "$CA_DEST"
-    echo "wrote DB_HOST=$(grep '^DB_HOST=' .env)"
-}
+    set_env_key DB_CONNECTION "${DB_CONNECTION}" .env
+    set_env_key DB_HOST       "${DB_HOST}"       .env
+    set_env_key DB_PORT       "${DB_PORT}"       .env
+    set_env_key DB_DATABASE   "${DB_DATABASE}"   .env
+    set_env_key DB_USERNAME   "${DB_USERNAME}"   .env
+    set_env_key DB_PASSWORD   "${DB_PASSWORD}"   .env
+    set_env_key MYSQL_ATTR_SSL_CA "${CA_DEST}"   .env
+fi
 
-step_npm_install() {
-    cd "${REPO_ROOT}/${APP_DIR}"
-    [ -f package.json ] || { echo "no package.json — skipped"; return 0; }
-    npm install --no-audit --no-fund
-}
-
-step_npm_build() {
-    cd "${REPO_ROOT}/${APP_DIR}"
-    [ -f package.json ] || { echo "no package.json — skipped"; return 0; }
-    if npm run 2>&1 | grep -qE "build"; then
-        npm run build
-    else
-        echo "no build script — skipped"
-        return 0
+# ------------------- 7. npm install + Tailwind build ----------
+if [ -f package.json ]; then
+    npm install --no-audit --no-fund --loglevel=error \
+        || warn "npm install failed"
+    if grep -qE '"build"' package.json; then
+        npm run build --loglevel=error >/dev/null 2>&1 || warn "npm run build failed"
     fi
-}
+fi
 
-step_opencode() {
-    # sudo resets PATH (node lives outside it) — install WITHOUT sudo
-    # using a user-level npm prefix, then expose the binary system-wide.
+# ------------------- 8. OpenCode (V2) -------------------------
+if ! command -v opencode >/dev/null 2>&1; then
     NPM_PREFIX="${HOME}/.npm-global"
     export NPM_CONFIG_PREFIX="${NPM_PREFIX}"
     mkdir -p "${NPM_PREFIX}"
-    npm install -g @opencode/cli@latest
-    BINFILE="$(find "${NPM_PREFIX}/bin" -maxdepth 1 -name 'opencode*' 2>/dev/null | head -n1)"
-    if [ -n "${BINFILE}" ]; then
-        sudo ln -sf "${BINFILE}" /usr/local/bin/opencode
+    if npm install -g @opencode/cli@latest --loglevel=error >/dev/null 2>&1; then
+        OPENCODE_BIN="$(find "${NPM_PREFIX}/bin" -maxdepth 1 -name 'opencode*' 2>/dev/null | head -n1)"
+        [ -n "${OPENCODE_BIN}" ] && sudo ln -sf "${OPENCODE_BIN}" /usr/local/bin/opencode
     else
-        echo "opencode binary not found in ${NPM_PREFIX}/bin"
-        return 1
+        warn "OpenCode install failed — run: npm i -g @opencode/cli"
     fi
-    opencode --version
-}
-
-step_ngrok() {
-    BIN_DIR="$HOME/.local/bin"
-    mkdir -p "$BIN_DIR"
-    if [ -x "${BIN_DIR}/ngrok" ] || command -v ngrok >/dev/null 2>&1; then
-        echo "ngrok binary already present"
-    else
-        case "$(uname -m)" in
-            aarch64 | arm64) NGROK_ARCH="linux-arm64" ;;
-            *)               NGROK_ARCH="linux-amd64" ;;
-        esac
-        echo "trying direct download (${NGROK_ARCH})..."
-        if curl -fsSL \
-            "https://ngrok-agent.s3.amazonaws.com/ngrok-v3-stable-${NGROK_ARCH}.tgz" \
-            | tar -xz -C "$BIN_DIR"; then
-            chmod +x "$BIN_DIR/ngrok"
-        else
-            echo "direct download failed — trying the ngrok apt repository..."
-            curl -fsSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
-                | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
-            echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
-                | sudo tee /etc/apt/sources.list.d/ngrok.list >/dev/null
-            sudo apt-get update -qq
-            sudo apt-get install -y ngrok
-        fi
-    fi
-    NGROK_BIN="$(command -v ngrok || echo "${BIN_DIR}/ngrok")"
-    if ! sudo ln -sf "${NGROK_BIN}" /usr/local/bin/ngrok 2>/dev/null; then
-        echo "(symlink skipped — same file)"
-    fi
-    ngrok --version
-}
-
-step_helper_commands() {
-    BIN_DIR="$HOME/.local/bin"
-    mkdir -p "$BIN_DIR"
-    for CMD in serve link; do
-        if [ -f "${REPO_ROOT}/bin/${CMD}" ]; then
-            cp "${REPO_ROOT}/bin/${CMD}" "${BIN_DIR}/${CMD}"
-            chmod +x "${BIN_DIR}/${CMD}"
-            sudo ln -sf "${BIN_DIR}/${CMD}" "/usr/local/bin/${CMD}"
-            echo "installed ${CMD} → ${BIN_DIR}/${CMD}"
-        else
-            echo "bin/${CMD} missing from the template repo"
-            return 1
-        fi
-    done
-    # persist the ngrok authtoken (home survives rebuilds)
-    if [ -n "${NGROK_AUTHTOKEN:-}" ]; then
-        printf '%s' "${NGROK_AUTHTOKEN}" > "$HOME/.ngrok-token"
-    fi
-    if [ -f "$HOME/.ngrok-token" ] && command -v ngrok >/dev/null 2>&1; then
-        NGROK_BIN="$(command -v ngrok)"
-        if "${NGROK_BIN}" config add-authtoken "$(cat "$HOME/.ngrok-token")" >/dev/null; then
-            echo "ngrok authtoken registered"
-        else
-            echo "!! failed to register the ngrok authtoken"
-            return 1
-        fi
-    else
-        echo "ngrok token NOT registered (missing token or binary)"
-        return 1
-    fi
-}
-
-step_serve_app() {
-    cd "${REPO_ROOT}"
-    [ -f "${APP_DIR}/artisan" ] || { echo "no ${APP_DIR}/artisan — skipped"; return 0; }
-    pkill -f "artisan serve" >/dev/null 2>&1 || true
-    cd "${APP_DIR}"
-    nohup php artisan serve --host=0.0.0.0 --port=8000 >/tmp/laravel-serve.log 2>&1 &
-    sleep 2
-    tail -2 /tmp/laravel-serve.log
-}
-
-# ---------- run the steps ----------
-step "1. Composer self-update"        step_composer_selfupdate
-step "2. PHP pdo_mysql extension"     step_php_extensions
-step "3. Database CA certificate"     step_copy_ca
-step "4. Clone application"           step_clone_app
-step "5. composer install"            step_composer_install
-step "6. .env + APP_KEY + DB creds"   step_env_file
-step "7. npm install"                 step_npm_install
-step "8. Tailwind build"              step_npm_build
-step "9. OpenCode"                    step_opencode
-step "10. ngrok"                      step_ngrok
-step "11. serve & link commands"      step_helper_commands
-step "12. Start dev server"           step_serve_app
-
-# ---------- environment diagnostics ----------
-cd "${REPO_ROOT}"
-echo ""
-echo "────────────── DIAGNOSTICS ──────────────"
-php -v 2>/dev/null | head -1 || echo "php missing"
-composer -V 2>/dev/null || echo "composer missing"
-node -v 2>/dev/null || echo "node missing"
-npm -v 2>/dev/null || echo "npm missing"
-(command -v ngrok && ngrok --version) 2>/dev/null || echo "ngrok not available"
-(command -v opencode && opencode --version) 2>/dev/null || echo "opencode not available"
-[ -f "$HOME/.mysql-ca.pem" ]        && echo "SSL CA file: present" || echo "SSL CA file: MISSING"
-[ -f "${REPO_ROOT}/${APP_DIR}/.env" ]         && echo ".env file: present"   || echo ".env file: MISSING"
-[ -d "${REPO_ROOT}/${APP_DIR}/vendor" ]       && echo "vendor/: present"     || echo "vendor/: MISSING"
-[ -d "${REPO_ROOT}/${APP_DIR}/node_modules" ] && echo "node_modules/: present" || echo "node_modules/: MISSING"
-[ -d "${REPO_ROOT}/${APP_DIR}/public/build" ] && echo "public/build/: present" || echo "public/build/: MISSING"
-pgrep -f "artisan serve" >/dev/null && echo "dev server: RUNNING on :8000" || echo "dev server: NOT running"
-curl -s -o /dev/null -w "port 8000 HTTP code: %{http_code}\n" --max-time 3 http://localhost:8000 || true
-echo "ngrok S3 reachability: $(curl -s -o /dev/null -w '%{http_code}' --max-time 8 https://ngrok-agent.s3.amazonaws.com/ || echo unreachable)"
-
-# ---------- summary ----------
-echo ""
-echo "══════════════════════════════════════════════════════"
-echo "  SUMMARY"
-echo "══════════════════════════════════════════════════════"
-if [ ${#PASSED[@]} -gt 0 ]; then
-    for s in "${PASSED[@]}"; do echo "✅ OK:      $s"; done
 fi
-for s in "${SKIPPED[@]:-}"; do
-    [ -n "$s" ] && echo "⏭️  SKIPPED: $s"
+
+# ------------------- 9. ngrok (direct → apt fallback) ---------
+if ! command -v ngrok >/dev/null 2>&1; then
+    mkdir -p "${BIN_DIR}"
+    case "$(uname -m)" in
+        aarch64 | arm64) NGROK_ARCH="linux-arm64" ;;
+        *)               NGROK_ARCH="linux-amd64" ;;
+    esac
+    if curl -fsSL "https://ngrok-agent.s3.amazonaws.com/ngrok-v3-stable-${NGROK_ARCH}.tgz" \
+        | tar -xz -C "${BIN_DIR}" 2>/dev/null
+    then chmod +x "${BIN_DIR}/ngrok"
+    else
+        # fallback: official apt repository
+        curl -fsSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+            | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+        echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
+            | sudo tee /etc/apt/sources.list.d/ngrok.list >/dev/null
+        sudo apt-get update -qq && sudo apt-get install -y -qq ngrok \
+            || warn "ngrok install failed"
+    fi
+fi
+command -v ngrok >/dev/null 2>&1 && sudo ln -sf "$(command -v ngrok)" /usr/local/bin/ngrok 2>/dev/null
+
+# persist the authtoken (home dir survives rebuilds)
+if [ -n "${NGROK_AUTHTOKEN}" ]; then
+    printf '%s' "${NGROK_AUTHTOKEN}" > "$HOME/.ngrok-token"
+fi
+if [ -f "$HOME/.ngrok-token" ] && command -v ngrok >/dev/null 2>&1; then
+    ngrok config add-authtoken "$(cat "$HOME/.ngrok-token")" >/dev/null
+fi
+
+# ------------------- 10. serve & link commands ----------------
+mkdir -p "${BIN_DIR}"
+for CMD in serve link; do
+    if [ -f "${REPO_ROOT}/bin/${CMD}" ]; then
+        cp "${REPO_ROOT}/bin/${CMD}" "${BIN_DIR}/${CMD}"
+        chmod +x "${BIN_DIR}/${CMD}"
+        sudo ln -sf "${BIN_DIR}/${CMD}" "/usr/local/bin/${CMD}" 2>/dev/null
+    else
+        warn "bin/${CMD} missing in the template repo"
+    fi
 done
-if [ ${#FAILED[@]} -gt 0 ]; then
-    for s in "${FAILED[@]}"; do
-        echo "❌ FAILED:  $s"
-    done
-    echo ""
-    echo "⚠️  ${#FAILED[@]} step(s) failed."
-    echo "   👉 Open post-create-report.txt (this file, repo root) and"
-    echo "      send its full content to your assistant."
-else
-    echo "🎉 ALL STEPS PASSED — try:  link"
+
+# ------------------- 11. Start the dev server -----------------
+cd "${REPO_ROOT}"
+if [ -f "${APP_DIR}/artisan" ] && [ -x "${BIN_DIR}/serve" ]; then
+    "${BIN_DIR}/serve" >/dev/null 2>&1 || warn "dev server failed to start"
+    sleep 2
+    pgrep -f "artisan serve" >/dev/null 2>&1 || warn "dev server is not running — try: serve"
 fi
-echo "Report saved to: ${REPORT_FILE}"
+
+# ------------------- done --------------------------------------
+echo ""
+echo "✅ Setup complete — app on http://localhost:8000"
+echo "   link   → print the public ngrok URL"
+echo "   serve  → restart the dev server"
+echo "   opencode → AI coding agent"

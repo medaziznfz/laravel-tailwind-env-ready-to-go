@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
-# link — start (or reuse) the ngrok tunnel and print the public URL.
+# link — print the public ngrok URL of the app served on port 8000.
+#        Starts the tunnel if none is running, or reuses the existing one.
 #        Also updates APP_URL in the app .env so it matches the tunnel.
-#        Works from anywhere (walks up to find the app .env).
+#        Works from anywhere (walks up the tree to find the app .env).
 #
 # Requires: an ngrok authtoken (NGROK_AUTHTOKEN env, ~/.ngrok-token,
 #           or pre-configured via `ngrok config add-authtoken`).
-set -euo pipefail
+set -u
 
 PORT=8000
 API_URL="http://127.0.0.1:4040/api/tunnels"
 
 resolve_url() {
-    curl -s "$API_URL" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).tunnels[0].public_url)}catch(e){}})'
+    # never let a curl/network failure kill this script (no set -e here,
+    # and no pipefail on this pipeline): return empty on any error
+    local resp
+    resp="$(curl -s --max-time 2 "${API_URL}" 2>/dev/null)" || return 0
+    [ -n "${resp}" ] || return 0
+    printf '%s' "${resp}" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).tunnels[0].public_url)}catch(e){}})'
+    return 0
 }
 
 locate_app() {
@@ -23,12 +30,17 @@ locate_app() {
     else
         while [ "${DIR}" != "/" ]; do
             DIR="$(dirname "${DIR}")"
-            [ -f "${DIR}/${APP_DIR:-src}/.env" ] && printf '%s' "${DIR}/${APP_DIR:-src}/.env" && return 0
+            if [ -f "${DIR}/${APP_DIR:-src}/.env" ]; then
+                printf '%s' "${DIR}/${APP_DIR:-src}/.env"
+                return 0
+            fi
         done
     fi
+    return 0
 }
 
 update_env_url() {
+    local ENVF URL
     ENVF="$(locate_app)"
     URL="$1"
     [ -n "${ENVF}" ] && [ -n "${URL}" ] || return 0
@@ -37,46 +49,51 @@ update_env_url() {
     else
         printf 'APP_URL="%s"\n' "${URL}" >> "${ENVF}"
     fi
+    echo "(APP_URL updated to match this link)"
 }
 
-# --- make sure an authtoken is configured -------------------------------
+# --- 1. make sure an authtoken is configured ---------------------------
 if ! ngrok config check >/dev/null 2>&1; then
     TOKEN="${NGROK_AUTHTOKEN:-}"
     if [ -z "${TOKEN}" ] && [ -f "$HOME/.ngrok-token" ]; then
         TOKEN="$(cat "$HOME/.ngrok-token")"
     fi
     if [ -z "${TOKEN}" ]; then
-        echo "No ngrok authtoken found."
-        echo "Get one free at https://dashboard.ngrok.com/get-started/your-authtoken then run:"
+        echo "NGROK_AUTHTOKEN not configured."
+        echo "Add the Codespace secret NGROK_AUTHTOKEN (github.com/settings/codespaces), or run:"
         echo "  ngrok config add-authtoken <token>"
         exit 1
     fi
     ngrok config add-authtoken "${TOKEN}" >/dev/null
 fi
 
-# --- a tunnel is already up? just print its URL -------------------------
-if curl -sf -o /dev/null "$API_URL"; then
-    URL="$(resolve_url)"
-    if [ -n "${URL}" ]; then
-        update_env_url "${URL}"
-        echo "${URL}"
-        exit 0
-    fi
+# --- 2. tunnel already running? just print its URL ---------------------
+URL="$(resolve_url)"
+if [ -n "${URL}" ]; then
+    update_env_url "${URL}"
+    echo "${URL}"
+    exit 0
 fi
 
-# --- otherwise start the tunnel and wait for it -------------------------
+# --- 3. start the tunnel and wait for it -------------------------------
+echo "🌐 starting ngrok tunnel on port ${PORT}..."
 nohup ngrok http "${PORT}" --log stdout --log-format logfmt >/tmp/ngrok.log 2>&1 &
 
+URL=""
 for _ in $(seq 1 20); do
     sleep 1
     URL="$(resolve_url)"
     if [ -n "${URL}" ]; then
-        update_env_url "${URL}"
-        echo "${URL}"
-        echo "(APP_URL in ${APP_DIR:-src}/.env was updated to match this link)"
-        exit 0
+        break
     fi
 done
 
-echo "Tunnel did not come up within 20s — check /tmp/ngrok.log"
+if [ -n "${URL}" ]; then
+    update_env_url "${URL}"
+    echo "${URL}"
+    exit 0
+fi
+
+echo "⚠  the tunnel did not start within 20s — last ngrok log lines:"
+tail -5 /tmp/ngrok.log 2>/dev/null
 exit 1

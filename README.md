@@ -60,15 +60,19 @@ One-click GitHub Codespace that provisions a **fully running Laravel + Tailwind 
 
 2. **Use this template** — `Use this template → Create a new repository` (or fork)
 3. **Open a Codespace** — `Code ▾ → Codespaces → Create codespace on main`
-3. **Wait a few minutes** — the setup script does everything automatically, with minimal output (it only speaks up when a credential is missing):
+3. **Wait a few minutes** — the setup script runs 12 steps, shows a ✅/❌ verdict for each one, and ends with a summary:
 
    ```
-   ✓ Composer self-update          ✓ PHP pdo_mysql extension
-   ✓ CA certificate installed      ✓ .env created from .env.example
-   ✓ APP_KEY generated             ✓ database credentials written
-   ✓ npm install + Tailwind build  ✓ OpenCode + ngrok ready
-   ✓ app serving on :8000
+   ── [1/12] Codespace secrets (DB_PASSWORD, NGROK_AUTHTOKEN)
+       ✅ PASSED
+   ── [2/12] Composer — latest version
+       ✅ PASSED
+   …
+
+   ✅ ALL 12 STEPS PASSED — app on http://localhost:8000
    ```
+
+   If a step fails, check the details in the terminal or the full log: `post-create-report.txt` (repo root).
 
 4. **Get your public link** — in the terminal, type:
 

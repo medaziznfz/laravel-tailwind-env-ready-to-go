@@ -52,6 +52,29 @@ update_env_url() {
     echo "(APP_URL updated to match this link)"
 }
 
+# the tunnel is useless if the app behind it is down — make sure the
+# dev server answers on :8000, and start it when it does not
+ensure_server() {
+    if curl -s --max-time 2 -o /dev/null "http://127.0.0.1:${PORT}"; then
+        return 0
+    fi
+    echo "🌐 dev server not running — starting it first…"
+    if command -v serve >/dev/null 2>&1; then
+        serve
+    elif [ -x "$HOME/.local/bin/serve" ]; then
+        "$HOME/.local/bin/serve"
+    else
+        echo "⚠  serve command not found — start the server manually and retry"
+        return 1
+    fi
+    sleep 2
+    if curl -s --max-time 3 -o /dev/null "http://127.0.0.1:${PORT}"; then
+        return 0
+    fi
+    echo "⚠  server still not answering on :${PORT} — see /tmp/laravel-serve.log"
+    return 1
+}
+
 # --- 1. make sure an authtoken is configured ---------------------------
 if ! ngrok config check >/dev/null 2>&1; then
     TOKEN="${NGROK_AUTHTOKEN:-}"
@@ -67,7 +90,12 @@ if ! ngrok config check >/dev/null 2>&1; then
     ngrok config add-authtoken "${TOKEN}" >/dev/null
 fi
 
-# --- 2. tunnel already running? just print its URL ---------------------
+# --- 2. dev server must be up before exposing it -----------------------
+if ! ensure_server; then
+    echo "⚠  continuing anyway — the tunnel will start, but the app may show errors"
+fi
+
+# --- 3. tunnel already running? just print its URL ---------------------
 URL="$(resolve_url)"
 if [ -n "${URL}" ]; then
     update_env_url "${URL}"
@@ -75,7 +103,7 @@ if [ -n "${URL}" ]; then
     exit 0
 fi
 
-# --- 3. start the tunnel and wait for it -------------------------------
+# --- 4. start the tunnel and wait for it -------------------------------
 echo "🌐 starting ngrok tunnel on port ${PORT}..."
 nohup ngrok http "${PORT}" --log stdout --log-format logfmt >/tmp/ngrok.log 2>&1 &
 

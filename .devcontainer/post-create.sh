@@ -309,14 +309,20 @@ phase_server() {
         return 1
     fi
     "${BIN_DIR}/serve" >/dev/null 2>&1 || warn "serve reported an error"
-    sleep 2
-    pgrep -f "artisan serve" >/dev/null 2>&1 || { warn "server is not running — try: serve"; return 1; }
-    if curl -s --max-time 3 -o /dev/null http://localhost:8000; then
-        ok "app answering on http://localhost:8000"
+    local tries
+    for tries in 1 2 3 4 5; do
+        if curl -s --max-time 2 -o /dev/null http://localhost:8000; then
+            ok "app answering on http://localhost:8000"
+            return 0
+        fi
+        sleep 1
+    done
+    if pgrep -f "artisan serve" >/dev/null 2>&1; then
+        warn "server running but port 8000 not answering yet — try: serve"
     else
-        warn "server process running but port 8000 not answering yet"
+        warn "server is not running — try: serve"
     fi
-    return 0
+    return 1
 }
 
 # ================= main run ====================================

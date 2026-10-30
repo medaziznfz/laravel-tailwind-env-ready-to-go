@@ -109,17 +109,26 @@ phase_pdo_mysql() {
         ok "pdo_mysql already loaded"
         return 0
     fi
-    echo "    … compiling pdo_mysql (~1 min, silent) …"
-    sudo docker-php-ext-install pdo_mysql >/dev/null 2>&1 \
-        || sudo -E docker-php-ext-install pdo_mysql || warn "pdo_mysql compile failed"
-    # docker-php-ext-enable loses PHP_INI_DIR under sudo — write the ini directly
+    echo "    … compiling pdo_mysql (~1 min, silent — log: /tmp/pdo-build.log) …"
+    sudo -E docker-php-ext-install pdo_mysql >/tmp/pdo-build.log 2>&1 \
+        || { echo "    ⚠ compile — last lines:"; tail -5 /tmp/pdo-build.log | sed 's/^/        /'; }
+    # docker-php-ext-enable loses PHP_INI_DIR under sudo — run it with the env restored
+    sudo PHP_INI_DIR=/usr/local/etc/php docker-php-ext-enable pdo_mysql >/dev/null 2>&1 || true
+    # belt & braces: write the ini file directly
     sudo sh -c 'mkdir -p /usr/local/etc/php/conf.d \
         && echo extension=pdo_mysql.so > /usr/local/etc/php/conf.d/docker-php-ext-pdo_mysql.ini'
     if php -m 2>/dev/null | grep -qiE '^pdo_mysql$'; then
         ok "pdo_mysql loaded"
         return 0
     fi
-    warn "pdo_mysql still not loaded"
+    warn "pdo_mysql still not loaded — diagnostics:"
+    echo "        scan dir: $(php -r 'echo PHP_CONFIG_FILE_SCAN_DIR;' 2>/dev/null)"
+    echo "        conf.d contents:"
+    ls -1 /usr/local/etc/php/conf.d/ 2>/dev/null | sed 's/^/          /'
+    echo "        installed extensions:"
+    ls -1 /usr/local/lib/php/extensions/*/ 2>/dev/null | sed 's/^/          /'
+    echo "        php startup output:"
+    php -v 2>&1 | head -3 | sed 's/^/          /'
     return 1
 }
 

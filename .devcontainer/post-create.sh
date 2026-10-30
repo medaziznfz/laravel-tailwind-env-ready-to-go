@@ -23,7 +23,12 @@ REPORT_FILE="${REPO_ROOT}/post-create-report.txt"
 BIN_DIR="$HOME/.local/bin"
 
 REPO_URL="https://github.com/S-Marouene/Laravel-adm-tawilwindcss.git"
-APP_DIR="src"
+
+# the app is cloned into a folder named after the real repository
+# (last segment of REPO_URL, without the .git suffix) — e.g.
+# Laravel-adm-tawilwindcss — not into a generic "src" folder
+APP_DIR="$(basename "${REPO_URL}" .git)"
+export APP_DIR                           # so serve/link inherit the right folder
 
 DB_CONNECTION=mysql
 DB_HOST=mysql-onpc-onpc.g.aivencloud.com
@@ -151,6 +156,9 @@ phase_clone() {
         return 0
     fi
     rm -rf "${APP_DIR}"
+    # cleanup: older versions of this template cloned the app into
+    # "src/" — remove that legacy folder if it still exists
+    [ -d "src" ] && rm -rf "src"
     git clone --quiet "${REPO_URL}" "${APP_DIR}" || { warn "clone failed (${REPO_URL})"; return 1; }
     ok "cloned into ${APP_DIR}/"
     return 0
@@ -246,7 +254,9 @@ phase_opencode() {
     return 1
 }
 
-# ------------------- 10. ngrok (direct → apt fallback) --------
+# ------------------- 10. ngrok (official apt repository) -------
+# apt is the most reliable method on Codespaces (Ubuntu/Debian) —
+# the standalone .tgz archive moved hosts once already, so we dropped it.
 phase_ngrok() {
     if [ -n "${NGROK_AUTHTOKEN}" ]; then
         printf '%s' "${NGROK_AUTHTOKEN}" > "$HOME/.ngrok-token"
@@ -254,27 +264,15 @@ phase_ngrok() {
     if command -v ngrok >/dev/null 2>&1; then
         ok "$(ngrok --version 2>/dev/null) already available"
     else
-        mkdir -p "${BIN_DIR}"
-        case "$(uname -m)" in
-            aarch64 | arm64) NGROK_ARCH="linux-arm64" ;;
-            *)               NGROK_ARCH="linux-amd64" ;;
-        esac
-        if curl -fsSL "https://ngrok-agent.s3.amazonaws.com/ngrok-v3-stable-${NGROK_ARCH}.tgz" \
-            | tar -xz -C "${BIN_DIR}" 2>/dev/null
-        then
-            chmod +x "${BIN_DIR}/ngrok"
-            ok "ngrok downloaded"
-        else
-            # fallback: official apt repository
-            echo "    … direct download failed, trying apt repository …"
-            curl -fsSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
-                | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
-            echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
-                | sudo tee /etc/apt/sources.list.d/ngrok.list >/dev/null
-            sudo apt-get update -qq && sudo apt-get install -y -qq ngrok \
-                || { warn "ngrok install failed"; return 1; }
-            ok "ngrok installed via apt"
-        fi
+        echo "    … installing ngrok via the official apt repository (may take a minute) …"
+        curl -fsSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+            | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+        echo "deb https://ngrok-agent.s3.amazonaws.com bookworm main" \
+            | sudo tee /etc/apt/sources.list.d/ngrok.list >/dev/null
+        sudo apt-get update -qq \
+            && sudo apt-get install -y -qq ngrok \
+            || { warn "ngrok install failed — check the network or the ngrok repository"; return 1; }
+        ok "ngrok installed via apt"
     fi
     sudo ln -sf "$(command -v ngrok)" /usr/local/bin/ngrok 2>/dev/null
     if command -v ngrok >/dev/null 2>&1 && [ -f "$HOME/.ngrok-token" ]; then

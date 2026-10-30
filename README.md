@@ -81,7 +81,7 @@ One-click GitHub Codespace that provisions a **fully running Laravel + Tailwind 
    # → https://xxxx-xx-xx-xx-xx.ngrok-free.app
    ```
 
-> Forgot to set a secret? No problem — at Codespace creation the script prints exactly which credential is missing and how to add it. Until then you can also edit `src/.env` by hand.
+> Forgot to set a secret? No problem — at Codespace creation the script prints exactly which credential is missing and how to add it. Until then you can also edit `.env` inside the app folder by hand.
 
 That's it — the app is live on the internet, sharing your terminal session's Codespace, connected to the cloud database.
 
@@ -92,7 +92,7 @@ That's it — the app is live on the internet, sharing your terminal session's C
 | `link` | Print the **public ngrok URL** (starts or reuses the tunnel, and syncs `APP_URL` in `.env`) |
 | `serve` | Restart the Laravel dev server on **port 8000** (background, log at `/tmp/laravel-serve.log`) |
 | `opencode` | AI coding agent ([docs](https://opencode.ai/v2/docs)) — sign in once via the TUI |
-| `npm run dev` | Tailwind / Vite **watch mode** on port 5173 (inside `src/`) |
+| `npm run dev` | Tailwind / Vite **watch mode** on port 5173 (inside the app folder) |
 
 Forwarded ports: `8000` (Laravel) · `5173` (Vite)
 
@@ -110,7 +110,7 @@ MYSQL_ATTR_SSL_CA=~/.mysql-ca.pem    # ← copy of certs/ca.pem
 ```
 
 - `certs/ca.pem` is copied to `~/.mysql-ca.pem` at creation (persistent across rebuilds) and referenced from `.env` — this satisfies Aiven's required TLS connection.
-- **Migrations are never run automatically.** The database tables already exist — if you ever need to migrate manually, run `php artisan migrate` inside `src/` *knowing what it touches*.
+- **Migrations are never run automatically.** The database tables already exist — if you ever need to migrate manually, run `php artisan migrate` inside the app folder *knowing what it touches*.
 - All non-secret values (host, port, database, user) live at the top of `.devcontainer/post-create.sh`.
 - **Secrets are handled through GitHub Codespaces secrets** (`DB_PASSWORD`, `NGROK_AUTHTOKEN`) — nothing credential-like is ever committed (GitHub's push protection would block it anyway).
 
@@ -126,13 +126,13 @@ Everything lives in **two files** — no container knowledge needed:
 
 | Change | Where |
 |---|---|
-| App repository / folder name | `REPO_URL` / `APP_DIR` — `.devcontainer/post-create.sh` |
+| App repository / folder name | `REPO_URL` — the clone folder is the real repo name (e.g. `Laravel-adm-tawilwindcss`), derived automatically from the URL |
 | Database host / name / user | `DB_*` block — `.devcontainer/post-create.sh` |
 | PHP version | image tag in `.devcontainer/devcontainer.json` (e.g. `4.1.7-8.5-trixie` → swap `8.4`) |
 | Node.js version | `"version": "26"` under `features` |
 | Credentials | Codespace secrets: `DB_PASSWORD`, `NGROK_AUTHTOKEN` |
 
-One nuance to know: DB values are written as `"quoted"` strings into `src/.env` (safe for passwords with special chars), and keys not in the replacement list (e.g. custom keys like `PREVENTION_API_*`) survive untouched.
+One nuance to know: DB values are written as `"quoted"` strings into the app `.env` (safe for passwords with special chars), and keys not in the replacement list (e.g. custom keys like `PREVENTION_API_*`) survive untouched.
 
 ## 🖥️ Local run (optional, no Codespaces)
 
@@ -151,7 +151,7 @@ php artisan serve && npm run dev
 | `Connection refused` / timeout to DB | Check `DB_HOST`/`DB_PORT` at the top of `post-create.sh`, and that the Aiven instance is running |
 | `certificate verify failed` | `cp certs/ca.pem ~/.mysql-ca.pem` then retry; if persistent, verify the Aiven CA hasn't rotated |
 | Tunnel didn't come up | `cat /tmp/ngrok.log`; ensure the token is valid — check `ngrok config check` |
-| Blank page / 500 on first visit | `tail -f storage/logs/laravel.log` in `src/` — usually a missing table or cache permission |
+| Blank page / 500 on first visit | `tail -f storage/logs/laravel.log` in the app folder — usually a missing table or cache permission |
 | `asset()` URLs wrong (mixed content) | Run `link` again — it syncs `APP_URL` to the current tunnel |
 
 ---

@@ -25,13 +25,13 @@ locate_app() {
     local DIR="$PWD"
     if [ -f "${DIR}/.env" ]; then
         printf '%s' "${DIR}/.env"
-    elif [ -f "${DIR}/${APP_DIR:-src}/.env" ]; then
-        printf '%s' "${DIR}/${APP_DIR:-src}/.env"
+    elif [ -f "${DIR}/${APP_DIR:-Laravel-adm-tawilwindcss}/.env" ]; then
+        printf '%s' "${DIR}/${APP_DIR:-Laravel-adm-tawilwindcss}/.env"
     else
         while [ "${DIR}" != "/" ]; do
             DIR="$(dirname "${DIR}")"
-            if [ -f "${DIR}/${APP_DIR:-src}/.env" ]; then
-                printf '%s' "${DIR}/${APP_DIR:-src}/.env"
+            if [ -f "${DIR}/${APP_DIR:-Laravel-adm-tawilwindcss}/.env" ]; then
+                printf '%s' "${DIR}/${APP_DIR:-Laravel-adm-tawilwindcss}/.env"
                 return 0
             fi
         done

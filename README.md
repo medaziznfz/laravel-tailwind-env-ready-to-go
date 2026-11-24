@@ -226,6 +226,7 @@ php artisan serve && npm run dev
 | Queue jobs not processed | `doctor`; check `/tmp/laravel-queue.log`; run `queue` to restart the worker |
 | Blank page / 500 on first visit | `tail -f storage/logs/laravel.log` in the app folder — usually a missing table or cache permission |
 | `asset()` URLs wrong (mixed content) | Run `link` again — it syncs `APP_URL` to the current tunnel |
+| VS Code asks "Do you trust the authors…" every time | The devcontainer/workspace tries to disable Workspace Trust, but the final decision is **client-side**. In the VS Code window: Settings → search `trust enabled` → uncheck **Security › Workspace › Trust: Enabled**, or run **Workspaces: Manage Workspace Trust → Add Folder** for both folders |
 
 ---
 

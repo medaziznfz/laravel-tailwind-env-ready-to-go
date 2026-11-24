@@ -35,7 +35,10 @@
         "shufo.vscode-blade-formatter"
       ],
       "settings": {
-        "terminal.integrated.defaultProfile.linux": "bash"
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "security.workspace.trust.enabled": false,
+        "security.workspace.trust.startupPrompt": "never",
+        "security.workspace.trust.emptyWindow": false
       }
     }
   },

@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# dev — start every background service the app needs:
+#         • Laravel dev server  (port 8000)
+#         • Reverb WebSocket    (port 8080)
+#         • queue worker        (database driver)
+#
+# Used by the Codespace postStartCommand, and safe to run at any time.
+#
+# Usage:  dev
+set -uo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+rc=0
+"${DIR}/serve"  || rc=1
+"${DIR}/reverb" || rc=1
+"${DIR}/queue"  || rc=1
+
+locate_env() {
+    local D="$PWD"
+    if [ -f "${D}/.env" ]; then printf '%s' "${D}/.env"; return 0; fi
+    if [ -f "${D}/${APP_DIR:-Laravel-adm-tawilwindcss}/.env" ]; then
+        printf '%s' "${D}/${APP_DIR:-Laravel-adm-tawilwindcss}/.env"; return 0
+    fi
+    while [ "${D}" != "/" ]; do
+        D="$(dirname "${D}")"
+        if [ -f "${D}/${APP_DIR:-Laravel-adm-tawilwindcss}/.env" ]; then
+            printf '%s' "${D}/${APP_DIR:-Laravel-adm-tawilwindcss}/.env"
+            return 0
+        fi
+    done
+    return 0
+}
+
+# True only when a real `ngrok http <port>` agent is running. The pattern is
+# anchored so a parent shell whose command line merely mentions the command
+# (e.g. `bash -c 'pkill -f "ngrok http 8080"; ./bin/dev'`) is never matched.
+ngrok_port_running() {
+    pgrep -f "^ngrok http $1( |$)" >/dev/null 2>&1
+}
+
+# If no public tunnel is alive (e.g. after a Codespace stop/start), point
+# the browser at the Codespaces-forwarded local ports instead of stale
+# ngrok hostnames left in .env from a previous session.
+ENVF="$(locate_env)"
+if [ -n "${ENVF}" ] && [ -f "${ENVF}" ]; then
+    if ! ngrok_port_running 8000; then
+        sed -i 's|^APP_URL=.*|APP_URL="http://localhost:8000"|' "${ENVF}"
+    fi
+    if ! ngrok_port_running 8080; then
+        if [ -n "${CODESPACE_NAME:-}" ] && [ -n "${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-}" ]; then
+            WS_PUBLIC_HOST="${CODESPACE_NAME}-8080.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}"
+            WS_PUBLIC_PORT=443
+            WS_PUBLIC_SCHEME=https
+        else
+            WS_PUBLIC_HOST=localhost
+            WS_PUBLIC_PORT=8080
+            WS_PUBLIC_SCHEME=http
+        fi
+        sed -i "s|^REVERB_PUBLIC_HOST=.*|REVERB_PUBLIC_HOST=\"${WS_PUBLIC_HOST}\"|" "${ENVF}"
+        sed -i "s|^REVERB_PUBLIC_PORT=.*|REVERB_PUBLIC_PORT=\"${WS_PUBLIC_PORT}\"|" "${ENVF}"
+        sed -i "s|^REVERB_PUBLIC_SCHEME=.*|REVERB_PUBLIC_SCHEME=\"${WS_PUBLIC_SCHEME}\"|" "${ENVF}"
+    fi
+    (cd "$(dirname "${ENVF}")" && php artisan config:clear >/dev/null 2>&1) || true
+fi
+
+echo ""
+echo "🌐 App:    http://localhost:8000"
+echo "🔌 Reverb: ws://localhost:8080"
+echo "📬 Queue:  worker running (log: /tmp/laravel-queue.log)"
+echo "   run  link  to expose the app + WebSocket publicly through ngrok"
+
+exit "${rc}"

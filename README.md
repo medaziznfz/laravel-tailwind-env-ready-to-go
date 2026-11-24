@@ -22,6 +22,8 @@ One-click GitHub Codespace that provisions a **fully running Laravel + Tailwind 
 | 🗄️ **Cloud MySQL** | Aiven instance — **no database runs inside the Codespace** |
 | 🔐 **SSL by default** | committed `certs/ca.pem` wired into Laravel's `MYSQL_ATTR_SSL_CA` |
 | 🌐 **ngrok tunnel** | the app is public at a stable `...ngrok-free.app` URL |
+| 🔌 **Reverb WebSocket** | real-time notifications on port 8080, auto-started |
+| 📬 **Queue worker** | database-backed worker, auto-started |
 | 🤖 **OpenCode V2** | AI coding agent CLI, auto-updated to latest |
 | 🖥️ **Auto-serving** | the app is already running on port 8000 when you arrive |
 
@@ -33,8 +35,12 @@ One-click GitHub Codespace that provisions a **fully running Laravel + Tailwind 
 │   ├── devcontainer.json      # container recipe: image, features, ports, extensions
 │   └── post-create.sh         # full auto-setup, runs on Codespace creation
 ├── bin/
+│   ├── dev                    # start app + Reverb + queue worker
 │   ├── serve                  # restart the Laravel dev server (background)
-│   └── link                   # print/update the public ngrok URL
+│   ├── reverb                 # restart the Reverb WebSocket server
+│   ├── queue                  # restart the queue worker
+│   ├── link                   # print/update the public ngrok URLs
+│   └── doctor                 # health check for all services
 ├── certs/
 │   └── ca.pem                 # database CA certificate (Aiven SSL)
 └── README.md
@@ -79,6 +85,7 @@ One-click GitHub Codespace that provisions a **fully running Laravel + Tailwind 
    ```bash
    link
    # → https://xxxx-xx-xx-xx-xx.ngrok-free.app
+   #   🔌 Reverb WebSocket: https://yyyy-xx-xx-xx-xx.ngrok-free.app
    ```
 
 > Forgot to set a secret? No problem — at Codespace creation the script prints exactly which credential is missing and how to add it. Until then you can also edit `.env` inside the app folder by hand.
@@ -89,12 +96,42 @@ That's it — the app is live on the internet, sharing your terminal session's C
 
 | Command | Description |
 |---|---|
-| `link` | Print the **public ngrok URL** (starts or reuses the tunnel, and syncs `APP_URL` in `.env`) |
+| `dev` | Start/restart **all three services**: Laravel, Reverb, queue worker |
+| `link` | Print the **public app + WebSocket URLs** (starts/reuses both tunnels, syncs `APP_URL` + `REVERB_PUBLIC_*`) |
 | `serve` | Restart the Laravel dev server on **port 8000** (background, log at `/tmp/laravel-serve.log`) |
+| `reverb` | Restart the Reverb WebSocket server on **port 8080** (log at `/tmp/laravel-reverb.log`) |
+| `queue` | Restart the queue worker (log at `/tmp/laravel-queue.log`) |
+| `doctor` | Check app / Reverb / queue / config / tunnels in one shot |
 | `opencode` | AI coding agent ([docs](https://opencode.ai/v2/docs)) — sign in once via the TUI |
 | `npm run dev` | Tailwind / Vite **watch mode** on port 5173 (inside the app folder) |
 
-Forwarded ports: `8000` (Laravel) · `5173` (Vite)
+Forwarded ports: `8000` (Laravel) · `8080` (Reverb WebSocket) · `5173` (Vite)
+
+## 🔌 Real-time (Reverb) & queues
+
+The Codespace keeps three processes alive in the background:
+
+| Service | Port | Log |
+|---|---|---|
+| Laravel (`php artisan serve`) | 8000 | `/tmp/laravel-serve.log` |
+| Reverb (`php artisan reverb:start --debug`) | 8080 | `/tmp/laravel-reverb.log` |
+| Queue worker (`php artisan queue:work`) | — | `/tmp/laravel-queue.log` |
+
+`link` opens **two** ngrok tunnels — one for the app and one for Reverb — then rewrites
+`APP_URL` and `REVERB_PUBLIC_*` in the app `.env`, so the browser's Echo client connects to
+`wss://<reverb-tunnel>.ngrok-free.app`. Without `link`, the browser uses
+`ws://localhost:8080`, which works through Codespaces port forwarding.
+
+The setup generates `REVERB_APP_ID` / `REVERB_APP_KEY` / `REVERB_APP_SECRET` once and keeps
+them across rebuilds. `BROADCAST_CONNECTION=reverb` and `QUEUE_CONNECTION=database` are set
+automatically; the `jobs` and `failed_jobs` tables already exist in the cloud database.
+
+Verify everything with:
+
+```bash
+doctor
+```
+
 
 ## 🗄️ Database
 
@@ -150,10 +187,13 @@ php artisan serve && npm run dev
 |---|---|
 | `Connection refused` / timeout to DB | Check `DB_HOST`/`DB_PORT` at the top of `post-create.sh`, and that the Aiven instance is running |
 | `certificate verify failed` | `cp certs/ca.pem ~/.mysql-ca.pem` then retry; if persistent, verify the Aiven CA hasn't rotated |
-| Tunnel didn't come up | `cat /tmp/ngrok.log`; ensure the token is valid — check `ngrok config check` |
+| Tunnel didn't come up | `cat /tmp/ngrok.log` (app) / `cat /tmp/ngrok-reverb.log` (Reverb); ensure the token is valid — check `ngrok config check` |
+| Notifications not instant | `doctor`; confirm `BROADCAST_CONNECTION=reverb` and check `/tmp/laravel-reverb.log`; run `link` so `REVERB_PUBLIC_*` matches the current tunnel |
+| Reverb exits with `Undefined constant SIGINT` | `pcntl` is missing — rerun the setup (PHP extensions step) or `sudo docker-php-ext-install pcntl` |
+| Queue jobs not processed | `doctor`; check `/tmp/laravel-queue.log`; run `queue` to restart the worker |
 | Blank page / 500 on first visit | `tail -f storage/logs/laravel.log` in the app folder — usually a missing table or cache permission |
 | `asset()` URLs wrong (mixed content) | Run `link` again — it syncs `APP_URL` to the current tunnel |
 
 ---
 
-**Stack:** Laravel · Tailwind CSS · Vite · MySQL (Aiven) · ngrok · OpenCode · VS Code · GitHub Codespaces
+**Stack:** Laravel · Tailwind CSS · Vite · Reverb · Queues · MySQL (Aiven) · ngrok · OpenCode · VS Code · GitHub Codespaces

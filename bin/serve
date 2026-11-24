@@ -32,9 +32,9 @@ fi
 # stop any previous instance — BOTH the artisan parent AND its php -S child
 # (artisan serve spawns a detached php -S server.php; killing only the
 #  parent leaves a zombie without newly-installed PHP extensions bound to 8000)
-pkill -f "artisan serve" >/dev/null 2>&1 || true
-pkill -f "php -S 0.0.0.0:8000" >/dev/null 2>&1 || true
-pkill -f "server.php" >/dev/null 2>&1 || true
+pkill -f "[a]rtisan serve" >/dev/null 2>&1 || true
+pkill -f "[p]hp -S 0.0.0.0:8000" >/dev/null 2>&1 || true
+pkill -f "[s]erver.php" >/dev/null 2>&1 || true
 sleep 1
 
 cd "${APP_ROOT}"
@@ -45,7 +45,7 @@ setsid php artisan serve --host=0.0.0.0 --port=8000 \
     </dev/null >>/tmp/laravel-serve.log 2>&1 &
 
 sleep 1
-if pgrep -f "artisan serve" >/dev/null 2>&1; then
+if pgrep -f "[a]rtisan serve" >/dev/null 2>&1; then
     echo "✅ Laravel running locally at http://localhost:8000 (log: /tmp/laravel-serve.log)"
     echo "🌐 To expose it on the internet: run  link"
 else

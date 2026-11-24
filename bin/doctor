@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# doctor — one-shot health check for the Codespace app services.
+#
+# Checks: Laravel (8000) · Reverb (8080) · queue worker · .env config ·
+#         ngrok tunnels · pending/failed jobs.
+#
+# Usage:  doctor
+set -u
+
+SRC="${APP_DIR:-Laravel-adm-tawilwindcss}"
+
+APP_ROOT="$PWD"
+if [ -f "${APP_ROOT}/artisan" ]; then
+    :
+elif [ -f "${APP_ROOT}/${SRC}/artisan" ]; then
+    APP_ROOT="${APP_ROOT}/${SRC}"
+else
+    while [ "${APP_ROOT}" != "/" ] && [ ! -f "${APP_ROOT}/${SRC}/artisan" ]; do
+        APP_ROOT="$(dirname "${APP_ROOT}")"
+    done
+fi
+
+if [ ! -f "${APP_ROOT}/artisan" ]; then
+    echo "❌ app not found — run the post-create setup first"
+    exit 1
+fi
+
+ENVF="${APP_ROOT}/.env"
+
+get_env() {
+    [ -f "${ENVF}" ] || return 0
+    sed -n "s/^${1}=//p" "${ENVF}" | head -n1 \
+        | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+}
+
+WS_PORT="$(get_env REVERB_SERVER_PORT)"
+[ -n "${WS_PORT}" ] || WS_PORT=8080
+
+pass=0
+fail=0
+ok()   { echo "  ✅ $*"; pass=$((pass + 1)); }
+bad()  { echo "  ❌ $*"; fail=$((fail + 1)); }
+warn() { echo "  ⚠  $*"; }
+
+echo "── App services"
+
+# Laravel HTTP
+CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8000 2>/dev/null || true)"
+if [ -n "${CODE}" ] && [ "${CODE}" != "000" ]; then
+    ok "Laravel answering on :8000 (HTTP ${CODE})"
+else
+    bad "Laravel not answering on :8000 — run: serve"
+fi
+
+# Reverb
+if (exec 3<>/dev/tcp/127.0.0.1/"${WS_PORT}") 2>/dev/null; then
+    ok "Reverb listening on :${WS_PORT}"
+else
+    bad "Reverb not listening on :${WS_PORT} — run: reverb"
+fi
+
+# Queue worker
+if pgrep -f "[a]rtisan queue:work" >/dev/null 2>&1; then
+    ok "queue worker running"
+else
+    bad "queue worker not running — run: queue"
+fi
+
+echo "── Configuration"
+BC="$(get_env BROADCAST_CONNECTION)"
+QC="$(get_env QUEUE_CONNECTION)"
+[ "${BC}" = "reverb" ] && ok "BROADCAST_CONNECTION=reverb" || warn "BROADCAST_CONNECTION=${BC:-<unset>} (expected reverb)"
+[ "${QC}" = "database" ] && ok "QUEUE_CONNECTION=database" || warn "QUEUE_CONNECTION=${QC:-<unset>} (expected database)"
+KEY="$(get_env REVERB_APP_KEY)"
+[ -n "${KEY}" ] && ok "REVERB_APP_KEY set" || bad "REVERB_APP_KEY missing in .env"
+echo "  ℹ  browser WS endpoint: $(get_env REVERB_PUBLIC_SCHEME)://$(get_env REVERB_PUBLIC_HOST):$(get_env REVERB_PUBLIC_PORT)"
+
+echo "── Queues"
+COUNTS="$(cd "${APP_ROOT}" && php artisan tinker --execute="echo 'pending='.DB::table('jobs')->count().' failed='.DB::table('failed_jobs')->count();" 2>/dev/null | tail -n1)"
+[ -n "${COUNTS}" ] && echo "  ℹ  ${COUNTS}" || warn "could not read queue table counts"
+
+echo "── Tunnels"
+APP_URL="$(curl -s --max-time 2 http://127.0.0.1:4040/api/tunnels 2>/dev/null \
+    | grep -o '"public_url":"[^"]*"' | head -n1 | cut -d'"' -f4 || true)"
+if [ -n "${APP_URL}" ]; then
+    ok "app tunnel: ${APP_URL}"
+else
+    warn "no app tunnel — run: link"
+fi
+WS_URL="$(grep -o 'url=https://[^ ]*' /tmp/ngrok-reverb.log 2>/dev/null | tail -n1 | cut -d= -f2 || true)"
+if [ -n "${WS_URL}" ]; then
+    ok "Reverb tunnel: ${WS_URL}"
+else
+    warn "no Reverb tunnel — run: link (or use forwarded port 8080)"
+fi
+
+echo ""
+echo "── ${pass} passed, ${fail} failed"
+[ "${fail}" -eq 0 ] || exit 1

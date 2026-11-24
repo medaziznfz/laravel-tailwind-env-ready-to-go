@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# queue — start or restart a Laravel queue worker (database driver).
+#
+# Works from anywhere: walks up the directory tree to find the Laravel app.
+# The worker runs in its own session (setsid) so it survives the Codespaces
+# lifecycle script that launched it.
+#
+# Usage:  queue                           (APP_DIR=<repo name> by default)
+#         APP_DIR=myapp queue
+set -euo pipefail
+
+SRC="${APP_DIR:-Laravel-adm-tawilwindcss}"
+
+# locate the directory containing artisan
+APP_ROOT="$PWD"
+if [ -f "${APP_ROOT}/artisan" ]; then
+    :   # already inside the app directory
+elif [ -f "${APP_ROOT}/${SRC}/artisan" ]; then
+    APP_ROOT="${APP_ROOT}/${SRC}"
+else
+    while [ "${APP_ROOT}" != "/" ] && [ ! -f "${APP_ROOT}/${SRC}/artisan" ]; do
+        APP_ROOT="$(dirname "${APP_ROOT}")"
+    done
+fi
+
+if [ ! -f "${APP_ROOT}/artisan" ]; then
+    echo "artisan not found (tried ./${SRC} and all parent folders) —"
+    echo "run the post-create setup first or check APP_DIR."
+    exit 1
+fi
+
+LOG="${QUEUE_LOG:-/tmp/laravel-queue.log}"
+
+# stop a previous instance (work or listen)
+pkill -f "[a]rtisan queue:work" >/dev/null 2>&1 || true
+pkill -f "[a]rtisan queue:listen" >/dev/null 2>&1 || true
+sleep 1
+
+cd "${APP_ROOT}"
+
+# timeout (60s) stays below queue.php's retry_after (90s) so a job is never
+# retried while the first attempt is still running.
+setsid php artisan queue:work --tries=1 --timeout=60 --sleep=1 \
+    </dev/null >>"${LOG}" 2>&1 &
+
+sleep 2
+
+if pgrep -f "[a]rtisan queue:work" >/dev/null 2>&1; then
+    echo "✅ Queue worker running (log: ${LOG})"
+else
+    echo "⚠  Queue worker did not start — last log lines:"
+    tail -10 "${LOG}" 2>/dev/null || true
+    exit 1
+fi

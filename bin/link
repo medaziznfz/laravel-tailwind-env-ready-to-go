@@ -1,24 +1,40 @@
 #!/usr/bin/env bash
-# link — print the public ngrok URL of the app served on port 8000.
-#        Starts the tunnel if none is running, or reuses the existing one.
-#        Also updates APP_URL in the app .env so it matches the tunnel.
+# link — print the public ngrok URLs of the app (8000) and Reverb (8080).
+#        Starts/reuses both tunnels, and syncs APP_URL + REVERB_PUBLIC_*
+#        in the app .env so browser WebSockets use the public HTTPS endpoint.
 #        Works from anywhere (walks up the tree to find the app .env).
 #
 # Requires: an ngrok authtoken (NGROK_AUTHTOKEN env, ~/.ngrok-token,
 #           or pre-configured via `ngrok config add-authtoken`).
+#
+# Output (first line = app URL, stable for scripting):
+#   https://xxxx.ngrok-free.app
+#   🔌 Reverb WebSocket: https://yyyy.ngrok-free.app
 set -u
 
 PORT=8000
-API_URL="http://127.0.0.1:4040/api/tunnels"
+WS_PORT=8080
+API_PORT=4040
+APP_LOG="/tmp/ngrok.log"
+WS_LOG="/tmp/ngrok-reverb.log"
 
+# ------------------------------- helpers -------------------------------
 resolve_url() {
-    # never let a curl/network failure kill this script (no set -e here,
-    # and no pipefail on this pipeline): return empty on any error
+    # never let a curl/network failure kill this script (no set -e here)
     local resp
-    resp="$(curl -s --max-time 2 "${API_URL}" 2>/dev/null)" || return 0
+    resp="$(curl -s --max-time 2 "http://127.0.0.1:${API_PORT}/api/tunnels" 2>/dev/null)" || return 0
     [ -n "${resp}" ] || return 0
-    printf '%s' "${resp}" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).tunnels[0].public_url)}catch(e){}})'
-    return 0
+    printf '%s' "${resp}" | grep -o '"public_url":"[^"]*"' | head -n1 | cut -d'"' -f4
+}
+
+resolve_ws_url() {
+    # ngrok writes: ... msg="started tunnel" ... url=https://xxxx.ngrok-free.app
+    [ -f "${WS_LOG}" ] || return 0
+    grep -o 'url=https://[^ ]*' "${WS_LOG}" 2>/dev/null | tail -n1 | cut -d= -f2
+}
+
+host_of_url() {
+    printf '%s' "$1" | sed -E 's#^https?://([^/:]+).*#\1#'
 }
 
 locate_app() {
@@ -39,17 +55,47 @@ locate_app() {
     return 0
 }
 
-update_env_url() {
-    local ENVF URL
-    ENVF="$(locate_app)"
-    URL="$1"
-    [ -n "${ENVF}" ] && [ -n "${URL}" ] || return 0
-    if grep -qE '^APP_URL=.*' "${ENVF}"; then
-        sed -i "s|^APP_URL=.*|APP_URL=\"${URL}\"|" "${ENVF}"
+set_env_key() {
+    local key="$1" value="$2" file="$3"
+    if grep -qE "^${key}=.*" "${file}"; then
+        sed -i "s|^${key}=.*|${key}=\"${value}\"|" "${file}"
     else
-        printf 'APP_URL="%s"\n' "${URL}" >> "${ENVF}"
+        printf '%s="%s"\n' "${key}" "${value}" >> "${file}"
     fi
-    echo "(APP_URL updated to match this link)"
+}
+
+update_env_endpoints() {
+    local APP_URL="$1" WS_URL="$2" ENVF
+    ENVF="$(locate_app)"
+    [ -n "${ENVF}" ] || return 0
+
+    if [ -n "${APP_URL}" ]; then
+        set_env_key APP_URL "${APP_URL}" "${ENVF}"
+    fi
+
+    if [ -n "${WS_URL}" ]; then
+        # Browser connects to wss://<tunnel-host>:443 — ngrok terminates TLS.
+        set_env_key REVERB_PUBLIC_HOST "$(host_of_url "${WS_URL}")" "${ENVF}"
+        set_env_key REVERB_PUBLIC_PORT "443" "${ENVF}"
+        set_env_key REVERB_PUBLIC_SCHEME "https" "${ENVF}"
+    else
+        # No public tunnel: use the Codespaces-forwarded HTTPS port when
+        # available, otherwise the local forwarded port.
+        if [ -n "${CODESPACE_NAME:-}" ] && [ -n "${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-}" ]; then
+            set_env_key REVERB_PUBLIC_HOST "${CODESPACE_NAME}-${WS_PORT}.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}" "${ENVF}"
+            set_env_key REVERB_PUBLIC_PORT "443" "${ENVF}"
+            set_env_key REVERB_PUBLIC_SCHEME "https" "${ENVF}"
+        else
+            set_env_key REVERB_PUBLIC_HOST "localhost" "${ENVF}"
+            set_env_key REVERB_PUBLIC_PORT "${WS_PORT}" "${ENVF}"
+            set_env_key REVERB_PUBLIC_SCHEME "http" "${ENVF}"
+        fi
+    fi
+
+    # Blade reads config('reverb.*') on every request — drop any cached config.
+    (cd "$(dirname "${ENVF}")" && php artisan config:clear >/dev/null 2>&1) || true
+
+    echo "(APP_URL + REVERB_PUBLIC_* updated to match this link)" >&2
 }
 
 # the tunnel is useless if the app behind it is down — make sure the
@@ -58,24 +104,92 @@ ensure_server() {
     if curl -s --max-time 2 -o /dev/null "http://127.0.0.1:${PORT}"; then
         return 0
     fi
-    echo "🌐 dev server not running — starting it first…"
+    echo "🌐 dev server not running — starting it first…" >&2
     if command -v serve >/dev/null 2>&1; then
-        serve
+        serve >&2
     elif [ -x "$HOME/.local/bin/serve" ]; then
-        "$HOME/.local/bin/serve"
+        "$HOME/.local/bin/serve" >&2
     else
-        echo "⚠  serve command not found — start the server manually and retry"
+        echo "⚠  serve command not found — start the server manually and retry" >&2
         return 1
     fi
     sleep 2
     if curl -s --max-time 3 -o /dev/null "http://127.0.0.1:${PORT}"; then
         return 0
     fi
-    echo "⚠  server still not answering on :${PORT} — see /tmp/laravel-serve.log"
+    echo "⚠  server still not answering on :${PORT} — see /tmp/laravel-serve.log" >&2
     return 1
 }
 
-# --- 1. make sure an authtoken is configured ---------------------------
+ensure_reverb() {
+    if (exec 3<>/dev/tcp/127.0.0.1/"${WS_PORT}") 2>/dev/null; then
+        return 0
+    fi
+    echo "🔌 Reverb not running — starting it first…" >&2
+    if command -v reverb >/dev/null 2>&1; then
+        reverb >&2
+    elif [ -x "$HOME/.local/bin/reverb" ]; then
+        "$HOME/.local/bin/reverb" >&2
+    else
+        echo "⚠  reverb command not found — start it manually and retry" >&2
+        return 1
+    fi
+    sleep 1
+    (exec 3<>/dev/tcp/127.0.0.1/"${WS_PORT}") 2>/dev/null
+}
+
+ensure_app_tunnel() {
+    local URL
+    URL="$(resolve_url)"
+    if [ -n "${URL}" ]; then
+        printf '%s' "${URL}"
+        return 0
+    fi
+
+    echo "🌐 starting ngrok tunnel for the app on ${PORT}…" >&2
+    nohup ngrok http "${PORT}" --log "${APP_LOG}" --log-format logfmt >/dev/null 2>&1 &
+
+    for _ in $(seq 1 20); do
+        sleep 1
+        URL="$(resolve_url)"
+        if [ -n "${URL}" ]; then
+            printf '%s' "${URL}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+ensure_ws_tunnel() {
+    local URL
+    if pgrep -f "^ngrok http ${WS_PORT}( |$)" >/dev/null 2>&1; then
+        URL="$(resolve_ws_url)"
+        if [ -n "${URL}" ]; then
+            printf '%s' "${URL}"
+            return 0
+        fi
+    fi
+
+    # stale/absent agent — restart cleanly so the log holds the current URL
+    pkill -f "^ngrok http ${WS_PORT}( |$)" >/dev/null 2>&1 || true
+    : > "${WS_LOG}" 2>/dev/null || true
+
+    echo "🔌 starting ngrok tunnel for Reverb on ${WS_PORT}…" >&2
+    nohup ngrok http "${WS_PORT}" --log "${WS_LOG}" --log-format logfmt >/dev/null 2>&1 &
+
+    for _ in $(seq 1 20); do
+        sleep 1
+        URL="$(resolve_ws_url)"
+        if [ -n "${URL}" ]; then
+            printf '%s' "${URL}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ------------------------------- main ----------------------------------
+# 1. make sure an authtoken is configured
 if ! ngrok config check >/dev/null 2>&1; then
     TOKEN="${NGROK_AUTHTOKEN:-}"
     if [ -z "${TOKEN}" ] && [ -f "$HOME/.ngrok-token" ]; then
@@ -90,38 +204,31 @@ if ! ngrok config check >/dev/null 2>&1; then
     ngrok config add-authtoken "${TOKEN}" >/dev/null
 fi
 
-# --- 2. dev server must be up before exposing it -----------------------
-if ! ensure_server; then
-    echo "⚠  continuing anyway — the tunnel will start, but the app may show errors"
+# 2. both services must be up before exposing them
+ensure_server || echo "⚠  continuing anyway — the app tunnel will start, but the app may show errors" >&2
+ensure_reverb || echo "⚠  continuing anyway — WebSocket connections will fail until Reverb starts" >&2
+
+# 3. app tunnel (reuse or start)
+APP_URL="$(ensure_app_tunnel)" || APP_URL=""
+
+# 4. Reverb tunnel (reuse or start)
+WS_URL="$(ensure_ws_tunnel)" || WS_URL=""
+
+# 5. sync .env so the browser and APP_URL match the current tunnels
+update_env_endpoints "${APP_URL}" "${WS_URL}"
+
+# 6. report
+if [ -n "${APP_URL}" ]; then
+    echo "${APP_URL}"
+else
+    echo "⚠  the app tunnel did not start within 20s — last ngrok log lines:" >&2
+    tail -5 "${APP_LOG}" 2>/dev/null >&2
 fi
 
-# --- 3. tunnel already running? just print its URL ---------------------
-URL="$(resolve_url)"
-if [ -n "${URL}" ]; then
-    update_env_url "${URL}"
-    echo "${URL}"
-    exit 0
+if [ -n "${WS_URL}" ]; then
+    echo "🔌 Reverb WebSocket: ${WS_URL}"
+else
+    echo "🔌 Reverb WebSocket: ws://localhost:${WS_PORT} (forwarded port only — no public tunnel)"
 fi
 
-# --- 4. start the tunnel and wait for it -------------------------------
-echo "🌐 starting ngrok tunnel on port ${PORT}..."
-nohup ngrok http "${PORT}" --log stdout --log-format logfmt >/tmp/ngrok.log 2>&1 &
-
-URL=""
-for _ in $(seq 1 20); do
-    sleep 1
-    URL="$(resolve_url)"
-    if [ -n "${URL}" ]; then
-        break
-    fi
-done
-
-if [ -n "${URL}" ]; then
-    update_env_url "${URL}"
-    echo "${URL}"
-    exit 0
-fi
-
-echo "⚠  the tunnel did not start within 20s — last ngrok log lines:"
-tail -5 /tmp/ngrok.log 2>/dev/null
-exit 1
+[ -n "${APP_URL}" ] || exit 1

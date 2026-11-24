@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# reverb — start or restart the Laravel Reverb WebSocket server on port 8080.
+#
+# Works from anywhere: walks up the directory tree to find the Laravel app.
+# The process is started in its own session (setsid) so it survives the
+# Codespaces lifecycle script that launched it.
+#
+# Usage:  reverb                          (APP_DIR=<repo name> by default)
+#         APP_DIR=myapp reverb
+set -euo pipefail
+
+SRC="${APP_DIR:-Laravel-adm-tawilwindcss}"
+
+# locate the directory containing artisan
+APP_ROOT="$PWD"
+if [ -f "${APP_ROOT}/artisan" ]; then
+    :   # already inside the app directory
+elif [ -f "${APP_ROOT}/${SRC}/artisan" ]; then
+    APP_ROOT="${APP_ROOT}/${SRC}"
+else
+    while [ "${APP_ROOT}" != "/" ] && [ ! -f "${APP_ROOT}/${SRC}/artisan" ]; do
+        APP_ROOT="$(dirname "${APP_ROOT}")"
+    done
+fi
+
+if [ ! -f "${APP_ROOT}/artisan" ]; then
+    echo "artisan not found (tried ./${SRC} and all parent folders) —"
+    echo "run the post-create setup first or check APP_DIR."
+    exit 1
+fi
+
+PORT="${REVERB_SERVER_PORT:-8080}"
+HOST="${REVERB_SERVER_HOST:-0.0.0.0}"
+LOG="${REVERB_LOG:-/tmp/laravel-reverb.log}"
+
+# stop a previous instance
+pkill -f "[a]rtisan reverb:start" >/dev/null 2>&1 || true
+sleep 1
+
+cd "${APP_ROOT}"
+
+# setsid: survive the Codespaces lifecycle process group; --debug logs every
+# published event so /tmp/laravel-reverb.log is useful while developing.
+setsid php artisan reverb:start --host="${HOST}" --port="${PORT}" --debug \
+    </dev/null >>"${LOG}" 2>&1 &
+
+sleep 2
+
+if pgrep -f "[a]rtisan reverb:start" >/dev/null 2>&1; then
+    echo "✅ Reverb running on ws://localhost:${PORT} (log: ${LOG})"
+else
+    echo "⚠  Reverb did not start — last log lines:"
+    tail -10 "${LOG}" 2>/dev/null || true
+    exit 1
+fi

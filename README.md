@@ -26,6 +26,7 @@ One-click GitHub Codespace that provisions a **fully running Laravel + Tailwind 
 | 📬 **Queue worker** | database-backed worker, auto-started |
 | 🤖 **OpenCode V2** | AI coding agent CLI, auto-updated to latest |
 | 🖥️ **Auto-serving** | the app is already running on port 8000 when you arrive |
+| 🔓 **No trust prompt** | Workspace Trust is disabled first thing in post-create |
 
 ## 📁 Repository structure
 
@@ -53,29 +54,34 @@ One-click GitHub Codespace that provisions a **fully running Laravel + Tailwind 
    The repo never stores your database password or ngrok token — GitHub injects them into the Codespace automatically:
 
    1. Open the repo → **Settings → Secrets and variables → Codespaces** (or *avatar → Settings → Codespaces → Codespaces secrets*)
-   2. Add **two secrets**:
+   2. Add these secrets (the third one is optional):
 
       | Name | Value |
       |---|---|
       | `DB_PASSWORD` | your database password |
       | `NGROK_AUTHTOKEN` | your [ngrok authtoken](https://dashboard.ngrok.com/get-started/your-authtoken) |
+      | `GH_PAT` *(optional)* | fine-grained PAT for `S-Marouene/Laravel-adm-tawilwindcss` with **Contents: Read and write** — needed only for `git push` |
 
    3. In **Repository access**, select this repository.
+   4. **Restart the Codespace** after adding a secret (secrets are injected at creation/restart), then run `git-auth` inside the app folder to verify pushes.
 
    > Each user of the template does this from **their own account** with their own values — nothing database-related is shared.
 
 2. **Use this template** — `Use this template → Create a new repository` (or fork)
 3. **Open a Codespace** — `Code ▾ → Codespaces → Create codespace on main`
-3. **Wait a few minutes** — the setup script runs 12 steps, shows a ✅/❌ verdict for each one, and ends with a summary:
+3. **Wait a few minutes** — the setup script runs 14 steps, disables the Workspace Trust prompt **first**, shows a ✅/❌ verdict for each step, and ends with a summary:
 
    ```
-   ── [1/12] Codespace secrets (DB_PASSWORD, NGROK_AUTHTOKEN)
+   ── [1/14] VS Code user settings (no trust prompt)
        ✅ PASSED
-   ── [2/12] Composer — latest version
+   ── [2/14] Codespace secrets (DB_PASSWORD, NGROK_AUTHTOKEN, GH_PAT)
+       ✅ PASSED
+   ── [3/14] Composer — latest version
        ✅ PASSED
    …
 
-   ✅ ALL 12 STEPS PASSED — app on http://localhost:8000
+   ✅ ALL 13 REQUIRED STEPS PASSED — app on http://localhost:8000
+      1 optional step(s) skipped — add GH_PAT + run git-auth to enable pushes
    ```
 
    If a step fails, check the details in the terminal or the full log: `post-create-report.txt` (repo root).
@@ -152,8 +158,13 @@ The fix is a personal access token exposed as the `GH_PAT` Codespace secret:
    **Contents: Read and write** — https://github.com/settings/personal-access-tokens/new
 2. Add it as a Codespaces secret named **`GH_PAT`** (account-level so it works in every
    Codespace) — https://github.com/settings/codespaces
-3. Restart the Codespace. The post-create step installs a repo-local credential helper that
-   uses `GH_PAT` instead of the scoped token, and every later setup repeats it automatically.
+3. Restart the Codespace (or just run `git-auth`). The post-create step installs a repo-local
+   credential helper that uses `GH_PAT` instead of the scoped token, and every later setup repeats
+   it automatically.
+
+> `GH_PAT` is **optional**: without it, post-create marks the push step as ⏭ SKIPPED instead of
+> failing — the app still starts normally. Pushes require the token (or a signed-in `gh` CLI /
+> SSH key).
 
 Verify at any time from inside the app folder:
 
@@ -223,6 +234,7 @@ php artisan serve && npm run dev
 | Tunnel didn't come up | `cat /tmp/ngrok.log` (app) / `cat /tmp/ngrok-reverb.log` (Reverb); ensure the token is valid — check `ngrok config check` |
 | Notifications not instant | `doctor`; confirm `BROADCAST_CONNECTION=reverb` and check `/tmp/laravel-reverb.log`; run `link` so `REVERB_PUBLIC_*` matches the current tunnel |
 | Reverb exits with `Undefined constant SIGINT` | `pcntl` is missing — rerun the setup (PHP extensions step) or `sudo docker-php-ext-install pcntl` |
+| pdo_mysql reported missing although `pdo_mysql.so` exists | Rerun the setup: the extension check now asks PHP via `extension_loaded()` instead of parsing `php -m` (which raced with `grep -q` under `pipefail`) |
 | Queue jobs not processed | `doctor`; check `/tmp/laravel-queue.log`; run `queue` to restart the worker |
 | Blank page / 500 on first visit | `tail -f storage/logs/laravel.log` in the app folder — usually a missing table or cache permission |
 | `asset()` URLs wrong (mixed content) | Run `link` again — it syncs `APP_URL` to the current tunnel |

@@ -2,8 +2,9 @@
 # ==============================================================
 # Codespace post-create setup — Laravel + Tailwind + cloud MySQL
 #
-# Installs/updates: Composer (latest), PHP pdo_mysql, app deps,
-# ngrok, OpenCode (V2) — then configures .env and starts the app.
+# Disables the VS Code Workspace Trust prompt FIRST, then installs/updates:
+# Composer (latest), PHP pdo_mysql, app deps, ngrok, OpenCode (V2) — and
+# configures .env and starts the app.
 #
 # Verbose step-by-step output: every step prints a banner, a
 # ✅ PASSED or ❌ FAILED verdict, and a final summary. The full
@@ -11,9 +12,10 @@
 #
 # Credentials are NOT in this file. They come from Codespace
 # secrets: DB_PASSWORD, NGROK_AUTHTOKEN and (optional) GH_PAT.
-# GH_PAT is only needed to push: the Codespaces GITHUB_TOKEN is scoped
-# to the repo that contains the codespace, so it cannot push to this app
-# repo. A personal access token fixes that permanently.
+# GH_PAT is optional and only needed to push: the Codespaces GITHUB_TOKEN
+# is scoped to the repo that contains the codespace, so it cannot push to
+# this app repo. Without a PAT/gh CLI/SSH key, that step is SKIPPED, not
+# failed; a personal access token fixes pushing permanently.
 # NO migrations are run — the app uses an existing database.
 # ==============================================================
 
@@ -52,7 +54,7 @@ exec > >(tee "${REPORT_FILE}") 2>&1
 TOTAL=14
 STEP_N=0
 CURRENT=""
-declare -a PASSED=() FAILED=()
+declare -a PASSED=() FAILED=() SKIPPED=()
 
 ok()   { echo "    ✓ $*"; }
 warn() { echo "    ⚠ $*"; }
@@ -64,14 +66,22 @@ step() {
     CURRENT="$1"
 }
 
+# status 2 means "optional step skipped" (e.g. GH_PAT was never provided)
 end_step() {
-    if [ "$1" -eq 0 ]; then
-        echo "    ✅ PASSED"
-        PASSED+=("${CURRENT}")
-    else
-        echo "    ❌ FAILED"
-        FAILED+=("${CURRENT}")
-    fi
+    case "$1" in
+        0)
+            echo "    ✅ PASSED"
+            PASSED+=("${CURRENT}")
+            ;;
+        2)
+            echo "    ⏭  SKIPPED (optional)"
+            SKIPPED+=("${CURRENT}")
+            ;;
+        *)
+            echo "    ❌ FAILED"
+            FAILED+=("${CURRENT}")
+            ;;
+    esac
 }
 
 # replace KEY=value in a file, or append it when missing
@@ -106,7 +116,61 @@ gen_hex() {
     openssl rand -hex "$1" 2>/dev/null || php -r "echo bin2hex(random_bytes($1));" 2>/dev/null
 }
 
-# ------------------- 1. Codespace secrets ---------------------
+# ------------------- 1. VS Code user settings ------------------
+# Workspace Trust is application-scoped: devcontainer.json settings cannot
+# switch it off, so the "Do you trust the authors?" dialog would reappear on
+# every new folder. Write it into the VS Code server's user settings instead.
+# This runs FIRST so the prompt is gone before anything else opens.
+phase_vscode_settings() {
+    local dir="$HOME/.vscode-remote/data/User"
+    local file="${dir}/settings.json"
+    mkdir -p "${dir}"
+
+    if [ -f "${file}" ] && grep -Eq '"security\.workspace\.trust\.enabled"[[:space:]]*:[[:space:]]*false' "${file}"; then
+        ok "Workspace Trust already disabled (${file})"
+        return 0
+    fi
+
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "${file}" <<'PY'
+import json, os, re, sys
+
+path = sys.argv[1]
+data = {}
+if os.path.exists(path) and os.path.getsize(path) > 0:
+    raw = open(path, encoding="utf-8").read()
+    # tolerate JSONC (comments, trailing commas) from hand-edited settings
+    raw = re.sub(r"//[^\n]*", "", raw)
+    raw = re.sub(r"/\*.*?\*/", "", raw, flags=re.S)
+    raw = re.sub(r",(\s*[}\]])", r"\1", raw)
+    try:
+        data = json.loads(raw)
+    except Exception:
+        data = {}
+data.update({
+    "security.workspace.trust.enabled": False,
+    "security.workspace.trust.startupPrompt": "never",
+    "security.workspace.trust.emptyWindow": False,
+})
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=4)
+    fh.write("\n")
+PY
+        ok "Workspace Trust prompt disabled (${file})"
+        return 0
+    fi
+
+    if [ ! -f "${file}" ]; then
+        printf '{\n    "security.workspace.trust.enabled": false,\n    "security.workspace.trust.startupPrompt": "never",\n    "security.workspace.trust.emptyWindow": false\n}\n' > "${file}"
+        ok "Workspace Trust prompt disabled (${file})"
+        return 0
+    fi
+
+    warn "could not update ${file} (python3 unavailable) — disable Workspace Trust manually"
+    return 1
+}
+
+# ------------------- 2. Codespace secrets ---------------------
 phase_secrets() {
     if [ -n "${DB_PASSWORD}" ]; then
         ok "DB_PASSWORD secret detected"
@@ -119,15 +183,15 @@ phase_secrets() {
     else
         warn "NGROK_AUTHTOKEN not set — 'link' will ask for it later"
     fi
-    if [ -n "${GH_PAT:-${GITHUB_PAT:-}}" ]; then
+    if [ -n "${GH_PAT:-${GITHUB_PAT:-${GH_TOKEN:-}}}" ]; then
         ok "GH_PAT secret detected (used for git push)"
     else
-        warn "GH_PAT not set — 'git push' will fail with 403 (see step 12)"
+        warn "GH_PAT not set — optional; pushes need a PAT or SSH key (see step 13)"
     fi
     return 0
 }
 
-# ------------------- 2. Composer (latest) ---------------------
+# ------------------- 3. Composer (latest) ---------------------
 phase_composer() {
     if ! command -v composer >/dev/null 2>&1; then
         warn "composer binary not found"
@@ -138,28 +202,44 @@ phase_composer() {
     return 0
 }
 
-# ------------------- 3. PHP extensions ------------------------
+# ------------------- 4. PHP extensions ------------------------
 # pdo_mysql  → cloud MySQL
 # pcntl      → required by `php artisan reverb:start` (signal handling)
-ensure_php_ext() {
+#
+# Ask PHP itself whether the module is loaded. Parsing `php -m` with
+# `grep -q` is unreliable under `set -o pipefail`: grep exits on the first
+# match, PHP gets SIGPIPE and the pipeline can report a failure even though
+# the extension is present.
+php_ext_loaded() {
     local ext="$1"
-    if php -m 2>/dev/null | grep -qiE "^${ext}$"; then
+    XDEBUG_MODE=off php -r 'exit(extension_loaded($argv[1]) ? 0 : 1);' "${ext}" >/dev/null 2>&1
+}
+
+ensure_php_ext() {
+    local ext="$1" attempt
+    if php_ext_loaded "${ext}"; then
         ok "${ext} already loaded"
         return 0
     fi
     echo "    … compiling ${ext} (~1 min, silent — log: /tmp/${ext}-build.log) …"
-    sudo -E docker-php-ext-install "${ext}" >"/tmp/${ext}-build.log" 2>&1 || true
+    XDEBUG_MODE=off sudo -E docker-php-ext-install "${ext}" >"/tmp/${ext}-build.log" 2>&1 || true
     # docker-php-ext-enable loses PHP_INI_DIR under sudo — run it with the env restored
     sudo PHP_INI_DIR=/usr/local/etc/php docker-php-ext-enable "${ext}" >/dev/null 2>&1 || true
     # belt & braces: write the ini file directly
     sudo sh -c "mkdir -p /usr/local/etc/php/conf.d \
         && echo extension=${ext}.so > /usr/local/etc/php/conf.d/docker-php-ext-${ext}.ini"
-    if php -m 2>/dev/null | grep -qiE "^${ext}$"; then
-        ok "${ext} loaded"
-        return 0
-    fi
+    # give PHP a moment to see the freshly installed .so / ini file
+    for attempt in 1 2 3; do
+        if php_ext_loaded "${ext}"; then
+            ok "${ext} loaded"
+            return 0
+        fi
+        sleep 1
+    done
     warn "${ext} still not loaded — last log lines:"
     tail -5 "/tmp/${ext}-build.log" 2>/dev/null | sed 's/^/        /'
+    # surface the real PHP startup error (missing library, wrong API, ...)
+    XDEBUG_MODE=off php -d display_errors=1 -r '' 2>&1 | grep -i "${ext}" | head -n2 | sed 's/^/        /'
     return 1
 }
 
@@ -175,7 +255,7 @@ phase_pdo_mysql() {
     return "${rc}"
 }
 
-# ------------------- 4. Database CA certificate ---------------
+# ------------------- 5. Database CA certificate ---------------
 phase_ca() {
     if [ ! -f "${REPO_ROOT}/${CA_FILE}" ]; then
         warn "${CA_FILE} missing in the template repo"
@@ -186,7 +266,7 @@ phase_ca() {
     return 0
 }
 
-# ------------------- 5. Clone the application -----------------
+# ------------------- 6. Clone the application -----------------
 phase_clone() {
     cd "${REPO_ROOT}" || return 1
     if [ -f "${APP_DIR}/artisan" ]; then
@@ -202,7 +282,7 @@ phase_clone() {
     return 0
 }
 
-# ------------------- 6. PHP dependencies ----------------------
+# ------------------- 7. PHP dependencies ----------------------
 phase_composer_install() {
     if [ ! -f "${APP_DIR}/composer.json" ]; then
         warn "no composer.json in ${APP_DIR}/"
@@ -220,7 +300,7 @@ phase_composer_install() {
     return 1
 }
 
-# ------------------- 7. .env + APP_KEY + credentials ----------
+# ------------------- 8. .env + APP_KEY + credentials ----------
 phase_env() {
     if [ ! -d "${APP_DIR}" ]; then
         warn "app directory missing"
@@ -280,7 +360,7 @@ phase_env() {
     return $?
 }
 
-# ------------------- 8. npm install + Tailwind build ----------
+# ------------------- 9. npm install + Tailwind build ----------
 phase_npm() {
     if [ ! -f "${APP_DIR}/package.json" ]; then
         warn "no package.json in ${APP_DIR}/ — skipping"
@@ -300,7 +380,7 @@ phase_npm() {
     return $?
 }
 
-# ------------------- 9. OpenCode (V2) -------------------------
+# ------------------- 10. OpenCode (V2) -------------------------
 phase_opencode() {
     if command -v opencode >/dev/null 2>&1; then
         ok "$(opencode --version 2>/dev/null | head -n1) already available"
@@ -324,7 +404,7 @@ phase_opencode() {
     return 1
 }
 
-# ------------------- 10. ngrok (official apt repository) -------
+# ------------------- 11. ngrok (official apt repository) -------
 # apt is the most reliable method on Codespaces (Ubuntu/Debian) —
 # the standalone .tgz archive moved hosts once already, so we dropped it.
 phase_ngrok() {
@@ -352,7 +432,7 @@ phase_ngrok() {
     command -v ngrok >/dev/null 2>&1
 }
 
-# ------------------- 11. serve & link commands ----------------
+# ------------------- 12. serve & link commands ----------------
 phase_commands() {
     mkdir -p "${BIN_DIR}"
     local missing=0 SRC CMD
@@ -373,12 +453,26 @@ phase_commands() {
     return "${missing}"
 }
 
-# ------------------- 12. Git push credentials -----------------
+# ------------------- 13. Git push credentials (optional) ------
 # Codespaces' GITHUB_TOKEN only has access to the repo the codespace was
 # created from. Install a repo-local helper that uses GH_PAT instead, so
 # pushes to the app repo work even though it belongs to another account.
+#
+# GH_PAT is a user-supplied secret, not something this script can create.
+# If neither a PAT nor a signed-in `gh` CLI nor an SSH key is available,
+# SKIP this step instead of failing the whole setup: the app itself is
+# ready to use, and pushes can be enabled later with `git-auth`.
+git_push_source_available() {
+    [ -n "${GH_PAT:-${GITHUB_PAT:-${GH_TOKEN:-}}}" ] && return 0
+    [ -s "$HOME/.config/git/github-pat" ] && return 0
+    if command -v gh >/dev/null 2>&1 && gh auth token >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
 phase_git_auth() {
-    local app="${REPO_ROOT}/${APP_DIR}" out rc
+    local app="${REPO_ROOT}/${APP_DIR}" out rc remote
 
     if [ ! -d "${app}/.git" ]; then
         warn "app repository not present — cannot configure push credentials"
@@ -391,6 +485,27 @@ phase_git_auth() {
         chmod +x "${BIN_DIR}/git-auth" "${BIN_DIR}/git-credential-github"
     fi
 
+    # An SSH remote with a key needs no PAT at all.
+    remote="$(git -C "${app}" remote get-url origin 2>/dev/null || true)"
+    case "${remote}" in
+        git@github.com:*)
+            if compgen -G "${HOME}/.ssh/id_*" >/dev/null 2>&1 || ssh-add -l >/dev/null 2>&1; then
+                ok "SSH remote in use — pushes authenticate with your SSH key"
+                return 0
+            fi
+            ;;
+    esac
+
+    if ! git_push_source_available; then
+        warn "no push token available (GH_PAT is optional) — skipping"
+        echo "        To enable pushes later, either:"
+        echo "          1. add a GH_PAT Codespaces secret, then run: git-auth"
+        echo "          2. save a token at ~/.config/git/github-pat, then run: git-auth"
+        echo "          3. sign in with 'gh auth login' (the helper falls back to it)"
+        echo "          4. add an SSH key and set an SSH origin remote"
+        return 2
+    fi
+
     out="$(cd "${app}" && "${BIN_DIR}/git-auth" 2>&1)"
     rc=$?
 
@@ -400,61 +515,8 @@ phase_git_auth() {
         return 0
     fi
 
-    warn "cannot push yet — GH_PAT is missing or invalid (repo: ${APP_DIR})"
+    warn "cannot push yet — the available token is missing or invalid (repo: ${APP_DIR})"
     printf '%s\n' "${out}" | sed 's/^/        /' | tail -n 14
-    return 1
-}
-
-# ------------------- 13. VS Code user settings -----------------
-# Workspace Trust is application-scoped: devcontainer.json settings cannot
-# switch it off, so the "Do you trust the authors?" dialog would reappear on
-# every new folder. Write it into the VS Code server's user settings instead.
-phase_vscode_settings() {
-    local dir="$HOME/.vscode-remote/data/User"
-    local file="${dir}/settings.json"
-    mkdir -p "${dir}"
-
-    if [ -f "${file}" ] && grep -Eq '"security\.workspace\.trust\.enabled"[[:space:]]*:[[:space:]]*false' "${file}"; then
-        ok "Workspace Trust already disabled (${file})"
-        return 0
-    fi
-
-    if command -v python3 >/dev/null 2>&1; then
-        python3 - "${file}" <<'PY'
-import json, os, re, sys
-
-path = sys.argv[1]
-data = {}
-if os.path.exists(path) and os.path.getsize(path) > 0:
-    raw = open(path, encoding="utf-8").read()
-    # tolerate JSONC (comments, trailing commas) from hand-edited settings
-    raw = re.sub(r"//[^\n]*", "", raw)
-    raw = re.sub(r"/\*.*?\*/", "", raw, flags=re.S)
-    raw = re.sub(r",(\s*[}\]])", r"\1", raw)
-    try:
-        data = json.loads(raw)
-    except Exception:
-        data = {}
-data.update({
-    "security.workspace.trust.enabled": False,
-    "security.workspace.trust.startupPrompt": "never",
-    "security.workspace.trust.emptyWindow": False,
-})
-with open(path, "w", encoding="utf-8") as fh:
-    json.dump(data, fh, indent=4)
-    fh.write("\n")
-PY
-        ok "Workspace Trust prompt disabled (${file})"
-        return 0
-    fi
-
-    if [ ! -f "${file}" ]; then
-        printf '{\n    "security.workspace.trust.enabled": false,\n    "security.workspace.trust.startupPrompt": "never",\n    "security.workspace.trust.emptyWindow": false\n}\n' > "${file}"
-        ok "Workspace Trust prompt disabled (${file})"
-        return 0
-    fi
-
-    warn "could not update ${file} (python3 unavailable) — disable Workspace Trust manually"
     return 1
 }
 
@@ -507,29 +569,33 @@ echo "╔═══════════════════════�
 echo "║  Codespace setup — Laravel + Tailwind + cloud MySQL      ║"
 echo "╚══════════════════════════════════════════════════════════╝"
 
-step "Codespace secrets (DB_PASSWORD, NGROK_AUTHTOKEN, GH_PAT)"; phase_secrets;  end_step $?
-step "Composer — latest version";                       phase_composer;        end_step $?
-step "PHP extensions (pdo_mysql, pcntl)";               phase_pdo_mysql;       end_step $?
-step "Database CA certificate";                         phase_ca;              end_step $?
-step "Clone application";                               phase_clone;           end_step $?
-step "PHP dependencies (composer install)";             phase_composer_install; end_step $?
-step ".env, APP_KEY and DB credentials";                phase_env;             end_step $?
-step "npm install + Tailwind build";                    phase_npm;             end_step $?
-step "OpenCode (V2)";                                   phase_opencode;        end_step $?
-step "ngrok";                                           phase_ngrok;           end_step $?
-step "serve & link commands";                           phase_commands;        end_step $?
-step "Git push credentials (GH_PAT)";                  phase_git_auth;        end_step $?
 step "VS Code user settings (no trust prompt)";         phase_vscode_settings; end_step $?
-step "Start app, queue & Reverb";                      phase_services;        end_step $?
+step "Codespace secrets (DB_PASSWORD, NGROK_AUTHTOKEN, GH_PAT)"; phase_secrets; end_step $?
+step "Composer — latest version";                       phase_composer;         end_step $?
+step "PHP extensions (pdo_mysql, pcntl)";               phase_pdo_mysql;        end_step $?
+step "Database CA certificate";                         phase_ca;               end_step $?
+step "Clone application";                               phase_clone;            end_step $?
+step "PHP dependencies (composer install)";             phase_composer_install; end_step $?
+step ".env, APP_KEY and DB credentials";                phase_env;              end_step $?
+step "npm install + Tailwind build";                    phase_npm;              end_step $?
+step "OpenCode (V2)";                                   phase_opencode;         end_step $?
+step "ngrok";                                           phase_ngrok;            end_step $?
+step "serve & link commands";                           phase_commands;         end_step $?
+step "Git push credentials (GH_PAT — optional)";        phase_git_auth;         end_step $?
+step "Start app, queue & Reverb";                       phase_services;         end_step $?
 
 # ------------------- summary ----------------------------------
 echo ""
 echo "════════════════ SETUP SUMMARY ════════════════"
 for P in "${PASSED[@]}"; do echo "  ✅ ${P}"; done
+for S in "${SKIPPED[@]}"; do echo "  ⏭  ${S}"; done
 for F in "${FAILED[@]}"; do echo "  ❌ ${F}"; done
 echo "────────────────────────────────────────────────"
 if [ "${#FAILED[@]}" -eq 0 ]; then
-    echo "✅ ALL ${TOTAL} STEPS PASSED — app on http://localhost:8000"
+    echo "✅ ALL ${#PASSED[@]} REQUIRED STEPS PASSED — app on http://localhost:8000"
+    if [ "${#SKIPPED[@]}" -gt 0 ]; then
+        echo "   ${#SKIPPED[@]} optional step(s) skipped — add GH_PAT + run git-auth to enable pushes"
+    fi
     echo "   link     → print the public app + WebSocket URLs"
     echo "   dev      → restart app, Reverb and the queue worker"
     echo "   doctor   → check app / Reverb / queue / tunnels"

@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# git-auth — configure and verify Git push credentials for this repository.
+#
+# The Codespaces GITHUB_TOKEN is scoped to the repository that contains the
+# codespace. Pushing to a different repository — even one your GitHub account
+# can write to — is rejected with:
+#   remote: Permission to <owner>/<repo>.git denied to <user>
+#   fatal: unable to access '...': The requested URL returned error: 403
+#
+# This command installs a repository-local credential helper that uses a
+# personal access token from the GH_PAT Codespaces secret (or a signed-in
+# `gh` CLI session) instead of the scoped Codespaces token.
+#
+# Usage:
+#   git-auth           configure + verify (run inside the app repository)
+#   git-auth --check   only report the current status
+set -uo pipefail
+
+HELPER_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/git-credential-github"
+HELPER_DST="$HOME/.local/bin/git-credential-github"
+
+ok()   { printf '  ✅ %s\n' "$*"; }
+warn() { printf '  ⚠  %s\n' "$*"; }
+bad()  { printf '  ❌ %s\n' "$*"; }
+info() { printf '  ℹ  %s\n' "$*"; }
+
+CHECK_ONLY=0
+[ "${1:-}" = "--check" ] && CHECK_ONLY=1
+
+TOP="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "${TOP}" ]; then
+    bad "not inside a Git repository"
+    echo "     cd into the app folder (e.g. Laravel-adm-tawilwindcss) and retry."
+    exit 1
+fi
+
+REMOTE_URL="$(git -C "${TOP}" remote get-url origin 2>/dev/null || true)"
+if [ -z "${REMOTE_URL}" ]; then
+    bad "no 'origin' remote configured in ${TOP}"
+    exit 1
+fi
+
+# owner/repo from https://github.com/owner/repo.git or git@github.com:owner/repo.git
+SLUG=""
+case "${REMOTE_URL}" in
+    https://github.com/*) SLUG="${REMOTE_URL#https://github.com/}" ;;
+    http://github.com/*)  SLUG="${REMOTE_URL#http://github.com/}" ;;
+    git@github.com:*)     SLUG="${REMOTE_URL#git@github.com:}" ;;
+esac
+SLUG="${SLUG%.git}"
+SLUG="${SLUG%/}"
+
+echo "── Git push credentials"
+info "repository: ${TOP}"
+info "origin:     ${REMOTE_URL}"
+
+if [ "${CHECK_ONLY}" -eq 0 ]; then
+    mkdir -p "$(dirname "${HELPER_DST}")"
+    if [ -f "${HELPER_SRC}" ] && [ "${HELPER_SRC}" != "${HELPER_DST}" ]; then
+        cp "${HELPER_SRC}" "${HELPER_DST}"
+    fi
+    chmod +x "${HELPER_DST}" 2>/dev/null || true
+
+    # Reset inherited helpers for THIS repository only, then use ours first.
+    # (Codespaces' /etc/gitconfig helper is still used in every other repo.)
+    git -C "${TOP}" config --local --unset-all credential.helper >/dev/null 2>&1 || true
+    git -C "${TOP}" config --local --add credential.helper ''
+    git -C "${TOP}" config --local --add credential.helper "${HELPER_DST}"
+    ok "repo-local credential helper installed"
+elif git -C "${TOP}" config --local --get-all credential.helper 2>/dev/null | grep -qxF "${HELPER_DST}"; then
+    ok "repo-local credential helper configured"
+else
+    bad "repo-local credential helper missing — run: git-auth"
+    exit 1
+fi
+
+# ---------- token ----------
+TOKEN="${GH_PAT:-${GITHUB_PAT:-${GH_TOKEN:-}}}"
+SOURCE="Codespaces secret"
+if [ -z "${TOKEN}" ] && [ -r "$HOME/.config/git/github-pat" ]; then
+    TOKEN="$(tr -d '\r\n' < "$HOME/.config/git/github-pat")"
+    SOURCE="~/.config/git/github-pat"
+fi
+if [ -z "${TOKEN}" ] && command -v gh >/dev/null 2>&1; then
+    TOKEN="$(gh auth token 2>/dev/null || true)"
+    SOURCE="gh auth session"
+fi
+
+if [ -z "${TOKEN}" ]; then
+    bad "no personal access token available"
+    echo ""
+    echo "  Fix it once, and it keeps working after rebuilds:"
+    echo "    1. Create a fine-grained token for ${SLUG:-the repository}"
+    echo "       with 'Contents: Read and write':"
+    echo "         https://github.com/settings/personal-access-tokens/new"
+    echo "    2. Save it as a Codespaces secret named GH_PAT:"
+    echo "         https://github.com/settings/codespaces"
+    echo "    3. Restart the codespace (or: export GH_PAT=... then re-run git-auth)."
+    echo ""
+    echo "  In a hurry (works without a restart, this codespace only):"
+    echo "     mkdir -p ~/.config/git"
+    echo "     read -rsp 'Token: ' T && printf '%s' \"\$T\" > ~/.config/git/github-pat && chmod 600 ~/.config/git/github-pat"
+    echo "     unset T; git-auth"
+    echo ""
+    echo "  Prefer SSH? Add an SSH key to your GitHub account and switch the"
+    echo "  remote with:  git remote set-url origin git@github.com:${SLUG}.git"
+    exit 1
+fi
+
+# ---------- verify identity ----------
+LOGIN="$(curl -sS --max-time 10 -H "Authorization: Bearer ${TOKEN}" \
+    https://api.github.com/user 2>/dev/null \
+    | sed -n 's/.*"login": *"\([^"]*\)".*/\1/p' | head -n1)"
+
+if [ -z "${LOGIN}" ]; then
+    bad "the token in ${SOURCE} is invalid or expired"
+    exit 1
+fi
+ok "token from ${SOURCE} — authenticated as ${LOGIN}"
+
+# ---------- verify write access ----------
+if [ -n "${SLUG}" ]; then
+    PERMS="$(curl -sS --max-time 10 -H "Authorization: Bearer ${TOKEN}" \
+        "https://api.github.com/repos/${SLUG}" 2>/dev/null)"
+    if printf '%s' "${PERMS}" | grep -q '"push": *true'; then
+        ok "write access to ${SLUG}"
+    elif printf '%s' "${PERMS}" | grep -q '"message"'; then
+        MSG="$(printf '%s' "${PERMS}" | sed -n 's/.*"message": *"\([^"]*\)".*/\1/p' | head -n1)"
+        bad "token cannot access ${SLUG} (${MSG:-API error})"
+        echo "     If the token is fine-grained, select that repository and"
+        echo "     grant 'Contents: Read and write', then update the secret."
+        exit 1
+    else
+        warn "token can read ${SLUG} but has no push permission"
+        echo "     Ask the repo owner for write access as ${LOGIN}, or use a"
+        echo "     token from the account that has it."
+        exit 1
+    fi
+fi
+
+echo ""
+echo "  Push with:  git push origin main"

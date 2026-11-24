@@ -10,7 +10,10 @@
 # log is also saved to post-create-report.txt (repo root).
 #
 # Credentials are NOT in this file. They come from Codespace
-# secrets: DB_PASSWORD and NGROK_AUTHTOKEN (Repository access set).
+# secrets: DB_PASSWORD, NGROK_AUTHTOKEN and (optional) GH_PAT.
+# GH_PAT is only needed to push: the Codespaces GITHUB_TOKEN is scoped
+# to the repo that contains the codespace, so it cannot push to this app
+# repo. A personal access token fixes that permanently.
 # NO migrations are run — the app uses an existing database.
 # ==============================================================
 
@@ -46,7 +49,7 @@ NGROK_AUTHTOKEN="${NGROK_AUTHTOKEN:-}"  # Codespace secret: NGROK_AUTHTOKEN
 # everything the script prints also goes to the report file
 exec > >(tee "${REPORT_FILE}") 2>&1
 
-TOTAL=12
+TOTAL=13
 STEP_N=0
 CURRENT=""
 declare -a PASSED=() FAILED=()
@@ -115,6 +118,11 @@ phase_secrets() {
         ok "ngrok authtoken available"
     else
         warn "NGROK_AUTHTOKEN not set — 'link' will ask for it later"
+    fi
+    if [ -n "${GH_PAT:-${GITHUB_PAT:-}}" ]; then
+        ok "GH_PAT secret detected (used for git push)"
+    else
+        warn "GH_PAT not set — 'git push' will fail with 403 (see step 12)"
     fi
     return 0
 }
@@ -365,7 +373,39 @@ phase_commands() {
     return "${missing}"
 }
 
-# ------------------- 12. Start app services -------------------
+# ------------------- 12. Git push credentials -----------------
+# Codespaces' GITHUB_TOKEN only has access to the repo the codespace was
+# created from. Install a repo-local helper that uses GH_PAT instead, so
+# pushes to the app repo work even though it belongs to another account.
+phase_git_auth() {
+    local app="${REPO_ROOT}/${APP_DIR}" out rc
+
+    if [ ! -d "${app}/.git" ]; then
+        warn "app repository not present — cannot configure push credentials"
+        return 1
+    fi
+
+    if [ ! -x "${BIN_DIR}/git-auth" ] && [ -f "${REPO_ROOT}/bin/git-auth" ]; then
+        cp "${REPO_ROOT}/bin/git-auth" "${BIN_DIR}/git-auth"
+        cp "${REPO_ROOT}/bin/git-credential-github" "${BIN_DIR}/git-credential-github"
+        chmod +x "${BIN_DIR}/git-auth" "${BIN_DIR}/git-credential-github"
+    fi
+
+    out="$(cd "${app}" && "${BIN_DIR}/git-auth" 2>&1)"
+    rc=$?
+
+    if [ "${rc}" -eq 0 ]; then
+        ok "$(printf '%s\n' "${out}" | grep -m1 'authenticated as' | sed 's/^ *✅ *//')"
+        ok "push credentials configured for ${APP_DIR}"
+        return 0
+    fi
+
+    warn "cannot push yet — GH_PAT is missing or invalid (repo: ${APP_DIR})"
+    printf '%s\n' "${out}" | sed 's/^/        /' | tail -n 14
+    return 1
+}
+
+# ------------------- 13. Start app services -------------------
 phase_services() {
     if [ ! -f "${APP_DIR}/artisan" ]; then
         warn "app not present — cannot start the services"
@@ -414,7 +454,7 @@ echo "╔═══════════════════════�
 echo "║  Codespace setup — Laravel + Tailwind + cloud MySQL      ║"
 echo "╚══════════════════════════════════════════════════════════╝"
 
-step "Codespace secrets (DB_PASSWORD, NGROK_AUTHTOKEN)"; phase_secrets;         end_step $?
+step "Codespace secrets (DB_PASSWORD, NGROK_AUTHTOKEN, GH_PAT)"; phase_secrets;  end_step $?
 step "Composer — latest version";                       phase_composer;        end_step $?
 step "PHP extensions (pdo_mysql, pcntl)";               phase_pdo_mysql;       end_step $?
 step "Database CA certificate";                         phase_ca;              end_step $?
@@ -425,6 +465,7 @@ step "npm install + Tailwind build";                    phase_npm;             e
 step "OpenCode (V2)";                                   phase_opencode;        end_step $?
 step "ngrok";                                           phase_ngrok;           end_step $?
 step "serve & link commands";                           phase_commands;        end_step $?
+step "Git push credentials (GH_PAT)";                  phase_git_auth;        end_step $?
 step "Start app, queue & Reverb";                      phase_services;        end_step $?
 
 # ------------------- summary ----------------------------------

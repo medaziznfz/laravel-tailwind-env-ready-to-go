@@ -102,6 +102,7 @@ That's it — the app is live on the internet, sharing your terminal session's C
 | `reverb` | Restart the Reverb WebSocket server on **port 8080** (log at `/tmp/laravel-reverb.log`) |
 | `queue` | Restart the queue worker (log at `/tmp/laravel-queue.log`) |
 | `doctor` | Check app / Reverb / queue / config / tunnels in one shot |
+| `git-auth` | Configure/verify the token used for `git push` (see below) |
 | `opencode` | AI coding agent ([docs](https://opencode.ai/v2/docs)) — sign in once via the TUI |
 | `npm run dev` | Tailwind / Vite **watch mode** on port 5173 (inside the app folder) |
 
@@ -133,6 +134,38 @@ doctor
 ```
 
 
+## 🔑 Pushing to GitHub
+
+The app repo lives under **another account's namespace** (`S-Marouene/Laravel-adm-tawilwindcss`),
+while the Codespace belongs to **your** account. Codespaces' built-in `GITHUB_TOKEN` is scoped to
+the repository that contains the Codespace, so `git push` fails even when your account has write
+access:
+
+```
+remote: Permission to S-Marouene/Laravel-adm-tawilwindcss.git denied to <you>.
+fatal: ... The requested URL returned error: 403
+```
+
+The fix is a personal access token exposed as the `GH_PAT` Codespace secret:
+
+1. Create a **fine-grained token** for `S-Marouene/Laravel-adm-tawilwindcss` with
+   **Contents: Read and write** — https://github.com/settings/personal-access-tokens/new
+2. Add it as a Codespaces secret named **`GH_PAT`** (account-level so it works in every
+   Codespace) — https://github.com/settings/codespaces
+3. Restart the Codespace. The post-create step installs a repo-local credential helper that
+   uses `GH_PAT` instead of the scoped token, and every later setup repeats it automatically.
+
+Verify at any time from inside the app folder:
+
+```bash
+git-auth          # re-install the helper + check token/account/write access
+git-auth --check  # report only
+```
+
+No token at hand? `gh auth login` also works (the helper falls back to `gh auth token`), and SSH
+remotes are fine too: `git remote set-url origin git@github.com:S-Marouene/Laravel-adm-tawilwindcss.git`.
+
+
 ## 🗄️ Database
 
 The connection targets a **cloud MySQL instance** (Aiven) — nothing is installed locally:
@@ -149,7 +182,7 @@ MYSQL_ATTR_SSL_CA=~/.mysql-ca.pem    # ← copy of certs/ca.pem
 - `certs/ca.pem` is copied to `~/.mysql-ca.pem` at creation (persistent across rebuilds) and referenced from `.env` — this satisfies Aiven's required TLS connection.
 - **Migrations are never run automatically.** The database tables already exist — if you ever need to migrate manually, run `php artisan migrate` inside the app folder *knowing what it touches*.
 - All non-secret values (host, port, database, user) live at the top of `.devcontainer/post-create.sh`.
-- **Secrets are handled through GitHub Codespaces secrets** (`DB_PASSWORD`, `NGROK_AUTHTOKEN`) — nothing credential-like is ever committed (GitHub's push protection would block it anyway).
+- **Secrets are handled through GitHub Codespaces secrets** (`DB_PASSWORD`, `NGROK_AUTHTOKEN`, optional `GH_PAT` for pushing) — nothing credential-like is ever committed (GitHub's push protection would block it anyway).
 
 ## 🔒 Security
 

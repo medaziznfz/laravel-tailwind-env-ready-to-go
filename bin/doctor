@@ -75,6 +75,15 @@ KEY="$(get_env REVERB_APP_KEY)"
 [ -n "${KEY}" ] && ok "REVERB_APP_KEY set" || bad "REVERB_APP_KEY missing in .env"
 echo "  ℹ  browser WS endpoint: $(get_env REVERB_PUBLIC_SCHEME)://$(get_env REVERB_PUBLIC_HOST):$(get_env REVERB_PUBLIC_PORT)"
 
+echo "── Git push"
+GITOUT="$(cd "${APP_ROOT}" && git-auth --check 2>&1)"
+GITRC=$?
+if [ "${GITRC}" -eq 0 ]; then
+    ok "$(printf '%s\n' "${GITOUT}" | grep -m1 -E 'authenticated as|write access' | sed 's/^ *✅ *//')"
+else
+    bad "push credentials are not ready — run: git-auth"
+fi
+
 echo "── Queues"
 COUNTS="$(cd "${APP_ROOT}" && php artisan tinker --execute="echo 'pending='.DB::table('jobs')->count().' failed='.DB::table('failed_jobs')->count();" 2>/dev/null | tail -n1)"
 [ -n "${COUNTS}" ] && echo "  ℹ  ${COUNTS}" || warn "could not read queue table counts"

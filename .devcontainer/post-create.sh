@@ -49,7 +49,7 @@ NGROK_AUTHTOKEN="${NGROK_AUTHTOKEN:-}"  # Codespace secret: NGROK_AUTHTOKEN
 # everything the script prints also goes to the report file
 exec > >(tee "${REPORT_FILE}") 2>&1
 
-TOTAL=13
+TOTAL=14
 STEP_N=0
 CURRENT=""
 declare -a PASSED=() FAILED=()
@@ -405,7 +405,60 @@ phase_git_auth() {
     return 1
 }
 
-# ------------------- 13. Start app services -------------------
+# ------------------- 13. VS Code user settings -----------------
+# Workspace Trust is application-scoped: devcontainer.json settings cannot
+# switch it off, so the "Do you trust the authors?" dialog would reappear on
+# every new folder. Write it into the VS Code server's user settings instead.
+phase_vscode_settings() {
+    local dir="$HOME/.vscode-remote/data/User"
+    local file="${dir}/settings.json"
+    mkdir -p "${dir}"
+
+    if [ -f "${file}" ] && grep -Eq '"security\.workspace\.trust\.enabled"[[:space:]]*:[[:space:]]*false' "${file}"; then
+        ok "Workspace Trust already disabled (${file})"
+        return 0
+    fi
+
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "${file}" <<'PY'
+import json, os, re, sys
+
+path = sys.argv[1]
+data = {}
+if os.path.exists(path) and os.path.getsize(path) > 0:
+    raw = open(path, encoding="utf-8").read()
+    # tolerate JSONC (comments, trailing commas) from hand-edited settings
+    raw = re.sub(r"//[^\n]*", "", raw)
+    raw = re.sub(r"/\*.*?\*/", "", raw, flags=re.S)
+    raw = re.sub(r",(\s*[}\]])", r"\1", raw)
+    try:
+        data = json.loads(raw)
+    except Exception:
+        data = {}
+data.update({
+    "security.workspace.trust.enabled": False,
+    "security.workspace.trust.startupPrompt": "never",
+    "security.workspace.trust.emptyWindow": False,
+})
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=4)
+    fh.write("\n")
+PY
+        ok "Workspace Trust prompt disabled (${file})"
+        return 0
+    fi
+
+    if [ ! -f "${file}" ]; then
+        printf '{\n    "security.workspace.trust.enabled": false,\n    "security.workspace.trust.startupPrompt": "never",\n    "security.workspace.trust.emptyWindow": false\n}\n' > "${file}"
+        ok "Workspace Trust prompt disabled (${file})"
+        return 0
+    fi
+
+    warn "could not update ${file} (python3 unavailable) — disable Workspace Trust manually"
+    return 1
+}
+
+# ------------------- 14. Start app services -------------------
 phase_services() {
     if [ ! -f "${APP_DIR}/artisan" ]; then
         warn "app not present — cannot start the services"
@@ -466,6 +519,7 @@ step "OpenCode (V2)";                                   phase_opencode;        e
 step "ngrok";                                           phase_ngrok;           end_step $?
 step "serve & link commands";                           phase_commands;        end_step $?
 step "Git push credentials (GH_PAT)";                  phase_git_auth;        end_step $?
+step "VS Code user settings (no trust prompt)";         phase_vscode_settings; end_step $?
 step "Start app, queue & Reverb";                      phase_services;        end_step $?
 
 # ------------------- summary ----------------------------------
